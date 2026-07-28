@@ -1,0 +1,60 @@
+version: 1
+
+server:
+  shutdown_timeout: 10s
+  read_header_timeout: 5s
+  idle_timeout: 60s
+
+listeners:
+  - name: http
+    address: ":80"
+    protocol: http
+
+  - name: https
+    address: ":443"
+    protocol: https
+    tls:
+      min_version: TLS1.2
+      default_certificate: fallback
+
+certificates:
+  - name: example-com
+    certificate_file: certificates/example.com/fullchain.pem
+    private_key_file: certificates/example.com/privatekey.pem
+
+  - name: fallback
+    certificate_file: certificates/fallback/fullchain.pem
+    private_key_file: certificates/fallback/privatekey.pem
+
+hosts:
+  - name: example
+    hostnames:
+      - example.com
+      - www.example.com
+    listeners:
+      - http
+      - https
+    tls:
+      certificate: example-com
+    http:
+      redirect_to_https: true
+    routes:
+      - name: api
+        match:
+          path: /api/
+        handle:
+          reverse_proxy:
+            url: http://127.0.0.1:3000
+            strip_prefix: /api
+
+      - name: application
+        match:
+          path: /
+        handle:
+          worker:
+            script: |
+              export default {
+                fetch(request, env) {
+                  return new Response("Hello from Yabber Worker");
+                }
+              }
