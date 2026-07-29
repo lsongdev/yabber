@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -19,13 +20,17 @@ var (
 )
 
 type Server struct {
-	mu      sync.Mutex
-	current atomic.Pointer[snapshot]
-	running map[string]*runningListener
-	started bool
-	errors  chan error
-	loader  CertificateLoader
-	http01  HTTP01Store
+	mu               sync.Mutex
+	current          atomic.Pointer[snapshot]
+	running          map[string]*runningListener
+	listenerFailures map[string]error
+	started          bool
+	errors           chan error
+	loader           CertificateLoader
+	http01           HTTP01Store
+	metrics          *Metrics
+	observers        []Observer
+	middleware       []Middleware
 }
 
 type runningListener struct {
@@ -51,6 +56,8 @@ type Option func(*serverOptions)
 type serverOptions struct {
 	certificateLoader CertificateLoader
 	http01Store       HTTP01Store
+	observers         []Observer
+	middleware        []Middleware
 }
 
 // HTTP01Store provides temporary ACME HTTP-01 key authorizations.
@@ -73,6 +80,27 @@ func WithHTTP01Store(store HTTP01Store) Option {
 	}
 }
 
+// WithObserver registers a completed-request observer.
+func WithObserver(observer Observer) Option {
+	return func(options *serverOptions) {
+		if observer != nil {
+			options.observers = append(options.observers, observer)
+		}
+	}
+}
+
+// WithAccessLog writes structured JSON access records to writer.
+func WithAccessLog(writer io.Writer) Option {
+	return WithObserver(NewAccessLog(writer))
+}
+
+// WithMiddleware installs application middleware on every non-ACME request.
+func WithMiddleware(middleware ...Middleware) Option {
+	return func(options *serverOptions) {
+		options.middleware = append(options.middleware, middleware...)
+	}
+}
+
 func New(config Config, options ...Option) (*Server, error) {
 	settings := serverOptions{certificateLoader: FileCertificateLoader{}}
 	for _, option := range options {
@@ -86,10 +114,14 @@ func New(config Config, options ...Option) (*Server, error) {
 		return nil, err
 	}
 	server := &Server{
-		running: make(map[string]*runningListener),
-		errors:  make(chan error, 16),
-		loader:  settings.certificateLoader,
-		http01:  settings.http01Store,
+		running:          make(map[string]*runningListener),
+		listenerFailures: make(map[string]error),
+		errors:           make(chan error, 16),
+		loader:           settings.certificateLoader,
+		http01:           settings.http01Store,
+		metrics:          newMetrics(),
+		observers:        settings.observers,
+		middleware:       settings.middleware,
 	}
 	server.current.Store(compiled)
 	return server, nil
@@ -108,7 +140,7 @@ func (s *Server) Handler(listenerName string) (http.Handler, error) {
 // Listener address, protocol, enabled state, and minimum TLS version cannot be
 // changed while running; use Restart for those changes.
 func (s *Server) Apply(config Config) error {
-	compiled, err := compile(config, s.loader)
+	compiled, err := compileWithPrevious(config, s.loader, s.current.Load())
 	if err != nil {
 		return err
 	}
@@ -118,7 +150,11 @@ func (s *Server) Apply(config Config) error {
 	if s.started && !runtimeTopologyEqual(s.current.Load(), compiled) {
 		return ErrRestartRequired
 	}
+	previous := s.current.Load()
 	s.current.Store(compiled)
+	for _, transport := range previous.transports {
+		transport.CloseIdleConnections()
+	}
 	return nil
 }
 
@@ -137,6 +173,7 @@ func (s *Server) startLocked() error {
 
 	snapshot := s.current.Load()
 	started := make(map[string]*runningListener)
+	s.listenerFailures = make(map[string]error)
 	for name, listenerConfig := range snapshot.listeners {
 		if !enabled(listenerConfig.Enabled) {
 			continue
@@ -150,8 +187,11 @@ func (s *Server) startLocked() error {
 
 		httpServer := &http.Server{
 			Handler:           &listenerHandler{server: s, name: name},
+			ReadTimeout:       snapshot.config.Server.ReadTimeout,
 			ReadHeaderTimeout: durationOr(snapshot.config.Server.ReadHeaderTimeout, 5*time.Second),
+			WriteTimeout:      snapshot.config.Server.WriteTimeout,
 			IdleTimeout:       durationOr(snapshot.config.Server.IdleTimeout, 60*time.Second),
+			MaxHeaderBytes:    intOr(snapshot.config.Server.MaxHeaderBytes, 64<<10),
 		}
 		serveListener := rawListener
 		if listenerConfig.Protocol == ProtocolHTTPS {
@@ -176,8 +216,12 @@ func (s *Server) startLocked() error {
 
 		go func(name string, server *http.Server, listener net.Listener) {
 			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				listenerError := &ListenerError{Listener: name, Err: err}
+				s.mu.Lock()
+				s.listenerFailures[name] = listenerError
+				s.mu.Unlock()
 				select {
-				case s.errors <- &ListenerError{Listener: name, Err: err}:
+				case s.errors <- listenerError:
 				default:
 				}
 			}
@@ -211,6 +255,9 @@ func (s *Server) shutdownLocked(ctx context.Context) error {
 			errs = append(errs, &ListenerError{Listener: name, Err: err})
 		}
 	}
+	for _, transport := range s.current.Load().transports {
+		transport.CloseIdleConnections()
+	}
 	return errors.Join(errs...)
 }
 
@@ -218,7 +265,7 @@ func (s *Server) shutdownLocked(ctx context.Context) error {
 // listeners cannot start, Yabber makes a best-effort attempt to restore the
 // previous configuration.
 func (s *Server) Restart(ctx context.Context, config Config) error {
-	compiled, err := compile(config, s.loader)
+	compiled, err := compileWithPrevious(config, s.loader, s.current.Load())
 	if err != nil {
 		return err
 	}
@@ -257,6 +304,53 @@ func (s *Server) Running() bool {
 	return s.started
 }
 
+// Healthy reports whether the server is started and every listener is healthy.
+func (s *Server) Healthy() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started || len(s.listenerFailures) != 0 {
+		return false
+	}
+	enabledListeners := 0
+	for name, config := range s.current.Load().listeners {
+		if !enabled(config.Enabled) {
+			continue
+		}
+		enabledListeners++
+		if s.running[name] == nil {
+			return false
+		}
+	}
+	return enabledListeners > 0
+}
+
+type ListenerStatus struct {
+	Address string
+	Enabled bool
+	Running bool
+	Error   string
+}
+
+// ListenerStatuses returns current runtime state for configured listeners.
+func (s *Server) ListenerStatuses() map[string]ListenerStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.current.Load()
+	statuses := make(map[string]ListenerStatus, len(snapshot.listeners))
+	for name, config := range snapshot.listeners {
+		status := ListenerStatus{Address: config.Address, Enabled: enabled(config.Enabled)}
+		if running := s.running[name]; running != nil && s.listenerFailures[name] == nil {
+			status.Address = running.listener.Addr().String()
+			status.Running = true
+		}
+		if err := s.listenerFailures[name]; err != nil {
+			status.Error = err.Error()
+		}
+		statuses[name] = status
+	}
+	return statuses
+}
+
 // Addresses returns the actual bound address of each running listener.
 func (s *Server) Addresses() map[string]string {
 	s.mu.Lock()
@@ -266,6 +360,11 @@ func (s *Server) Addresses() map[string]string {
 		addresses[name] = listener.listener.Addr().String()
 	}
 	return addresses
+}
+
+// Metrics returns a point-in-time request metrics snapshot.
+func (s *Server) Metrics() MetricsSnapshot {
+	return s.metrics.Snapshot()
 }
 
 // Close stops all listeners using the configured shutdown timeout.
@@ -282,6 +381,49 @@ type listenerHandler struct {
 }
 
 func (h *listenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	started := time.Now()
+	clientIP := ""
+	if address := remoteAddress(r.RemoteAddr); address.IsValid() {
+		clientIP = address.String()
+	}
+	state := &requestState{
+		RequestID: requestID(r),
+		Listener:  h.name,
+		ClientIP:  clientIP,
+		Applied:   make(map[string]struct{}),
+	}
+	r.Header.Set("X-Request-ID", state.RequestID)
+	w.Header().Set("X-Request-ID", state.RequestID)
+	r = withRequestState(r, state)
+	tracker := &responseTracker{ResponseWriter: w}
+	h.server.metrics.begin()
+	defer func() {
+		recovered := recover()
+		if recovered != nil && tracker.status == 0 {
+			http.Error(tracker, "internal server error", http.StatusInternalServerError)
+		}
+		h.server.metrics.end()
+		status := tracker.status
+		if status == 0 {
+			status = http.StatusOK
+		}
+		record := RequestRecord{
+			Time: started.UTC(), Duration: time.Since(started),
+			RequestID: state.RequestID, Listener: state.Listener,
+			Host: state.Host, Route: state.Route, ClientIP: state.ClientIP,
+			Method: r.Method, Path: r.URL.Path, Status: status,
+			Bytes: tracker.bytes, RejectedBy: state.RejectedBy,
+			Panicked: recovered != nil,
+		}
+		h.server.metrics.ObserveRequest(record)
+		for _, observer := range h.server.observers {
+			func() {
+				defer func() { _ = recover() }()
+				observer.ObserveRequest(record)
+			}()
+		}
+	}()
+
 	const prefix = "/.well-known/acme-challenge/"
 	if h.server.http01 != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
 		strings.HasPrefix(r.URL.Path, prefix) {
@@ -292,10 +434,11 @@ func (h *listenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				host = name
 			}
 			if keyAuthorization, ok := h.server.http01.GetHTTP01Token(strings.ToLower(strings.TrimSuffix(host, ".")), token); ok {
-				w.Header().Set("Content-Type", "text/plain")
-				w.Header().Set("Cache-Control", "no-store")
+				state.Route = "acme-http-01"
+				tracker.Header().Set("Content-Type", "text/plain")
+				tracker.Header().Set("Cache-Control", "no-store")
 				if r.Method != http.MethodHead {
-					_, _ = w.Write([]byte(keyAuthorization))
+					_, _ = tracker.Write([]byte(keyAuthorization))
 				}
 				return
 			}
@@ -303,10 +446,10 @@ func (h *listenerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	handler := h.server.current.Load().handlers[h.name]
 	if handler == nil {
-		http.NotFound(w, r)
+		http.NotFound(tracker, r)
 		return
 	}
-	handler.ServeHTTP(w, r)
+	chain(handler, h.server.middleware...).ServeHTTP(tracker, r)
 }
 
 func durationOr(value, fallback time.Duration) time.Duration {

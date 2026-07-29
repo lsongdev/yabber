@@ -4,6 +4,7 @@ go 1.26.1
 
 require (
 	github.com/lsongdev/workers-go v0.0.0-20260406114953-755eda039598
+	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

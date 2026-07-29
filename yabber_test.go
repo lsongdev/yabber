@@ -375,10 +375,8 @@ listeners:
     protocol: http
 certificates:
   - name: unused
-    source:
-      files:
-        certificate: certs/site.pem
-        private_key: certs/site.key
+    certificate_file: certs/site.pem
+    private_key_file: certs/site.key
 hosts:
   - name: site
     hostnames: [example.com]

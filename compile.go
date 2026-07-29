@@ -1,6 +1,7 @@
 package yabber
 
 import (
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -22,6 +23,8 @@ type snapshot struct {
 	handlers     map[string]http.Handler
 	certificates map[string]*certificateIndex
 	listeners    map[string]Listener
+	transports   []*http.Transport
+	policies     map[string]compiledPolicy
 }
 
 type certificateIndex struct {
@@ -36,14 +39,29 @@ type wildcardCertificate struct {
 }
 
 func compile(cfg Config, loader CertificateLoader) (*snapshot, error) {
+	return compileWithPrevious(cfg, loader, nil)
+}
+
+func compileWithPrevious(cfg Config, loader CertificateLoader, previous *snapshot) (*snapshot, error) {
 	if cfg.Version == 0 {
 		cfg.Version = ConfigVersion
 	}
 	if cfg.Version != ConfigVersion {
 		return nil, fmt.Errorf("unsupported config version %d", cfg.Version)
 	}
+	if err := validateServerConfig(cfg.Server); err != nil {
+		return nil, err
+	}
 
 	listeners, err := validateListeners(cfg.Listeners)
+	if err != nil {
+		return nil, err
+	}
+	var previousPolicies map[string]compiledPolicy
+	if previous != nil {
+		previousPolicies = previous.policies
+	}
+	policies, err := compilePolicies(cfg.Policies, previousPolicies)
 	if err != nil {
 		return nil, err
 	}
@@ -56,6 +74,7 @@ func compile(cfg Config, loader CertificateLoader) (*snapshot, error) {
 		handlers:     make(map[string]http.Handler),
 		certificates: make(map[string]*certificateIndex),
 		listeners:    listeners,
+		policies:     policies,
 	}
 
 	type hostForListener struct {
@@ -160,7 +179,7 @@ func compile(cfg Config, loader CertificateLoader) (*snapshot, error) {
 		}
 
 		for _, item := range hostsByListener[name] {
-			hostHandler, err := compileHost(item.host, listener)
+			hostHandler, err := compileHost(item.host, listener, policies, result)
 			if err != nil {
 				return nil, err
 			}
@@ -191,7 +210,15 @@ func compile(cfg Config, loader CertificateLoader) (*snapshot, error) {
 		}
 
 		dispatch.sort()
-		result.handlers[name] = dispatch
+		handler, err := applyPolicies(dispatch, listener.Policies, policies, fmt.Sprintf("listener %q", listener.Name))
+		if err != nil {
+			return nil, err
+		}
+		resolver, err := newClientIPResolver(listener.TrustedProxies)
+		if err != nil {
+			return nil, fmt.Errorf("listener %q: %w", listener.Name, err)
+		}
+		result.handlers[name] = resolver.middleware(handler)
 		if index != nil {
 			index.sort()
 			result.certificates[name] = index
@@ -199,6 +226,24 @@ func compile(cfg Config, loader CertificateLoader) (*snapshot, error) {
 	}
 
 	return result, nil
+}
+
+func validateServerConfig(config ServerConfig) error {
+	for name, value := range map[string]time.Duration{
+		"shutdown_timeout":    config.ShutdownTimeout,
+		"read_timeout":        config.ReadTimeout,
+		"read_header_timeout": config.ReadHeaderTimeout,
+		"write_timeout":       config.WriteTimeout,
+		"idle_timeout":        config.IdleTimeout,
+	} {
+		if value < 0 {
+			return fmt.Errorf("server %s cannot be negative", name)
+		}
+	}
+	if config.MaxHeaderBytes < 0 {
+		return errors.New("server max_header_bytes cannot be negative")
+	}
+	return nil
 }
 
 func validateListeners(input []Listener) (map[string]Listener, error) {
@@ -286,7 +331,12 @@ func verifyCertificateHostname(certificate *tls.Certificate, hostname string) er
 	return nil
 }
 
-func compileHost(host VirtualHost, listener Listener) (handler http.Handler, err error) {
+func compileHost(
+	host VirtualHost,
+	listener Listener,
+	policies map[string]compiledPolicy,
+	result *snapshot,
+) (handler http.Handler, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("host %q has conflicting routes: %v", host.Name, recovered)
@@ -319,15 +369,20 @@ func compileHost(host VirtualHost, listener Listener) (handler http.Handler, err
 		if method != "" {
 			pattern = method + " " + path
 		}
-		routeHandler, err := compileHandler(route)
+		routeHandler, err := compileHandler(route, result)
 		if err != nil {
 			return nil, fmt.Errorf("route %q: %w", route.Name, err)
 		}
+		routeHandler, err = applyPolicies(routeHandler, route.Policies, policies, fmt.Sprintf("route %q", route.Name))
+		if err != nil {
+			return nil, err
+		}
+		routeHandler = withRoute(route.Name, routeHandler)
 		mux.Handle(pattern, routeHandler)
 	}
 
 	if listener.Protocol == ProtocolHTTP && host.HTTP != nil && host.HTTP.RedirectToHTTPS {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			target := *r.URL
 			target.Scheme = "https"
 			target.Host = requestHostname(r.Host)
@@ -335,12 +390,18 @@ func compileHost(host VirtualHost, listener Listener) (handler http.Handler, err
 				target.Host = net.JoinHostPort(target.Host, port)
 			}
 			http.Redirect(w, r, target.String(), http.StatusPermanentRedirect)
-		}), nil
+		})
+	} else {
+		handler = mux
 	}
-	return mux, nil
+	handler, err = applyPolicies(handler, host.Policies, policies, fmt.Sprintf("host %q", host.Name))
+	if err != nil {
+		return nil, err
+	}
+	return withHost(host.Name, handler), nil
 }
 
-func compileHandler(route Route) (http.Handler, error) {
+func compileHandler(route Route, result *snapshot) (http.Handler, error) {
 	count := 0
 	if route.Handle.ReverseProxy != nil {
 		count++
@@ -367,7 +428,13 @@ func compileHandler(route Route) (http.Handler, error) {
 			return nil, fmt.Errorf("invalid reverse proxy URL %q", config.URL)
 		}
 		stripPrefix := config.StripPrefix
+		transport, err := reverseProxyTransport(*config)
+		if err != nil {
+			return nil, err
+		}
+		result.transports = append(result.transports, transport)
 		proxy := &httputil.ReverseProxy{
+			Transport: transport,
 			Rewrite: func(request *httputil.ProxyRequest) {
 				if stripPrefix != "" {
 					request.Out.URL.Path = strings.TrimPrefix(request.Out.URL.Path, stripPrefix)
@@ -377,12 +444,31 @@ func compileHandler(route Route) (http.Handler, error) {
 				}
 				request.SetURL(target)
 				request.SetXForwarded()
+				if clientIP := ClientIP(request.In); clientIP != "" {
+					request.Out.Header.Set("X-Forwarded-For", clientIP)
+				}
 			},
-			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+				var maxBytesError *http.MaxBytesError
+				if errors.As(err, &maxBytesError) {
+					http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+					return
+				}
+				if errors.Is(err, context.DeadlineExceeded) || errors.Is(r.Context().Err(), context.DeadlineExceeded) {
+					http.Error(w, "gateway timeout", http.StatusGatewayTimeout)
+					return
+				}
 				http.Error(w, "bad gateway", http.StatusBadGateway)
 			},
 		}
-		return proxy, nil
+		if config.RequestTimeout <= 0 {
+			return proxy, nil
+		}
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), config.RequestTimeout)
+			defer cancel()
+			proxy.ServeHTTP(w, r.WithContext(ctx))
+		}), nil
 	}
 
 	if config := route.Handle.FileServer; config != nil {
@@ -401,7 +487,7 @@ func compileHandler(route Route) (http.Handler, error) {
 		if status == 0 {
 			status = http.StatusOK
 		}
-		if status < 100 || status > 999 {
+		if status < 200 || status > 599 {
 			return nil, fmt.Errorf("invalid response status %d", status)
 		}
 		headers := make(http.Header, len(config.Headers))
@@ -436,6 +522,55 @@ func compileHandler(route Route) (http.Handler, error) {
 
 	config := route.Handle.Worker
 	return NewWorkerHandler(config.Script)
+}
+
+func reverseProxyTransport(config ReverseProxy) (*http.Transport, error) {
+	for name, value := range map[string]time.Duration{
+		"dial_timeout":            config.DialTimeout,
+		"tls_handshake_timeout":   config.TLSHandshakeTimeout,
+		"response_header_timeout": config.ResponseHeaderTimeout,
+		"idle_conn_timeout":       config.IdleConnTimeout,
+		"expect_continue_timeout": config.ExpectContinueTimeout,
+		"request_timeout":         config.RequestTimeout,
+	} {
+		if value < 0 {
+			return nil, fmt.Errorf("%s cannot be negative", name)
+		}
+	}
+	for name, value := range map[string]int{
+		"max_idle_conns":          config.MaxIdleConns,
+		"max_idle_conns_per_host": config.MaxIdleConnsPerHost,
+		"max_conns_per_host":      config.MaxConnsPerHost,
+	} {
+		if value < 0 {
+			return nil, fmt.Errorf("%s cannot be negative", name)
+		}
+	}
+	if config.MaxResponseHeaderBytes < 0 {
+		return nil, errors.New("max_response_header_bytes cannot be negative")
+	}
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	dialTimeout := durationOr(config.DialTimeout, 5*time.Second)
+	transport.DialContext = (&net.Dialer{
+		Timeout: dialTimeout, KeepAlive: 30 * time.Second,
+	}).DialContext
+	transport.TLSHandshakeTimeout = durationOr(config.TLSHandshakeTimeout, 10*time.Second)
+	transport.ResponseHeaderTimeout = durationOr(config.ResponseHeaderTimeout, 30*time.Second)
+	transport.IdleConnTimeout = durationOr(config.IdleConnTimeout, 90*time.Second)
+	transport.ExpectContinueTimeout = durationOr(config.ExpectContinueTimeout, time.Second)
+	transport.MaxIdleConns = intOr(config.MaxIdleConns, 100)
+	transport.MaxIdleConnsPerHost = intOr(config.MaxIdleConnsPerHost, 10)
+	transport.MaxConnsPerHost = config.MaxConnsPerHost
+	transport.MaxResponseHeaderBytes = config.MaxResponseHeaderBytes
+	return transport, nil
+}
+
+func intOr(value, fallback int) int {
+	if value > 0 {
+		return value
+	}
+	return fallback
 }
 
 // NewWorkerHandler creates the same Worker runtime used by configured routes.
@@ -480,8 +615,11 @@ func tlsVersion(value string) (uint16, error) {
 }
 
 func runtimeTopologyEqual(a, b *snapshot) bool {
-	if durationOr(a.config.Server.ReadHeaderTimeout, 5*time.Second) != durationOr(b.config.Server.ReadHeaderTimeout, 5*time.Second) ||
-		durationOr(a.config.Server.IdleTimeout, 60*time.Second) != durationOr(b.config.Server.IdleTimeout, 60*time.Second) {
+	if a.config.Server.ReadTimeout != b.config.Server.ReadTimeout ||
+		durationOr(a.config.Server.ReadHeaderTimeout, 5*time.Second) != durationOr(b.config.Server.ReadHeaderTimeout, 5*time.Second) ||
+		a.config.Server.WriteTimeout != b.config.Server.WriteTimeout ||
+		durationOr(a.config.Server.IdleTimeout, 60*time.Second) != durationOr(b.config.Server.IdleTimeout, 60*time.Second) ||
+		intOr(a.config.Server.MaxHeaderBytes, 64<<10) != intOr(b.config.Server.MaxHeaderBytes, 64<<10) {
 		return false
 	}
 	if len(a.listeners) != len(b.listeners) {

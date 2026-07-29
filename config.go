@@ -24,6 +24,7 @@ const (
 type Config struct {
 	Version      int           `json:"version" yaml:"version"`
 	Server       ServerConfig  `json:"server,omitempty" yaml:"server,omitempty"`
+	Policies     []Policy      `json:"policies,omitempty" yaml:"policies,omitempty"`
 	Listeners    []Listener    `json:"listeners" yaml:"listeners"`
 	Certificates []Certificate `json:"certificates,omitempty" yaml:"certificates,omitempty"`
 	Hosts        []VirtualHost `json:"hosts" yaml:"hosts"`
@@ -31,16 +32,21 @@ type Config struct {
 
 type ServerConfig struct {
 	ShutdownTimeout   time.Duration `json:"shutdown_timeout,omitempty" yaml:"shutdown_timeout,omitempty"`
+	ReadTimeout       time.Duration `json:"read_timeout,omitempty" yaml:"read_timeout,omitempty"`
 	ReadHeaderTimeout time.Duration `json:"read_header_timeout,omitempty" yaml:"read_header_timeout,omitempty"`
+	WriteTimeout      time.Duration `json:"write_timeout,omitempty" yaml:"write_timeout,omitempty"`
 	IdleTimeout       time.Duration `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
+	MaxHeaderBytes    int           `json:"max_header_bytes,omitempty" yaml:"max_header_bytes,omitempty"`
 }
 
 type Listener struct {
-	Name     string     `json:"name" yaml:"name"`
-	Address  string     `json:"address" yaml:"address"`
-	Protocol Protocol   `json:"protocol" yaml:"protocol"`
-	Enabled  *bool      `json:"enabled,omitempty" yaml:"enabled,omitempty"`
-	TLS      *TLSConfig `json:"tls,omitempty" yaml:"tls,omitempty"`
+	Name           string     `json:"name" yaml:"name"`
+	Address        string     `json:"address" yaml:"address"`
+	Protocol       Protocol   `json:"protocol" yaml:"protocol"`
+	Enabled        *bool      `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	TLS            *TLSConfig `json:"tls,omitempty" yaml:"tls,omitempty"`
+	TrustedProxies []string   `json:"trusted_proxies,omitempty" yaml:"trusted_proxies,omitempty"`
+	Policies       []string   `json:"policies,omitempty" yaml:"policies,omitempty"`
 }
 
 type TLSConfig struct {
@@ -63,6 +69,7 @@ type VirtualHost struct {
 	Enabled   *bool     `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	TLS       *HostTLS  `json:"tls,omitempty" yaml:"tls,omitempty"`
 	HTTP      *HostHTTP `json:"http,omitempty" yaml:"http,omitempty"`
+	Policies  []string  `json:"policies,omitempty" yaml:"policies,omitempty"`
 	Routes    []Route   `json:"routes,omitempty" yaml:"routes,omitempty"`
 }
 
@@ -75,10 +82,37 @@ type HostHTTP struct {
 }
 
 type Route struct {
-	Name    string  `json:"name" yaml:"name"`
-	Match   Match   `json:"match,omitempty" yaml:"match,omitempty"`
-	Handle  Handler `json:"handle" yaml:"handle"`
-	Enabled *bool   `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Name     string   `json:"name" yaml:"name"`
+	Match    Match    `json:"match,omitempty" yaml:"match,omitempty"`
+	Handle   Handler  `json:"handle" yaml:"handle"`
+	Enabled  *bool    `json:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Policies []string `json:"policies,omitempty" yaml:"policies,omitempty"`
+}
+
+// Policy is a reusable middleware bundle. Policies may be attached to a
+// listener, virtual host, or route.
+type Policy struct {
+	Name        string             `json:"name" yaml:"name"`
+	Request     *RequestPolicy     `json:"request,omitempty" yaml:"request,omitempty"`
+	RateLimit   *RateLimitPolicy   `json:"rate_limit,omitempty" yaml:"rate_limit,omitempty"`
+	Concurrency *ConcurrencyPolicy `json:"concurrency,omitempty" yaml:"concurrency,omitempty"`
+}
+
+type RequestPolicy struct {
+	MaxBodyBytes int64         `json:"max_body_bytes,omitempty" yaml:"max_body_bytes,omitempty"`
+	Timeout      time.Duration `json:"timeout,omitempty" yaml:"timeout,omitempty"`
+}
+
+type RateLimitPolicy struct {
+	RequestsPerSecond float64       `json:"requests_per_second" yaml:"requests_per_second"`
+	Burst             int           `json:"burst" yaml:"burst"`
+	Key               string        `json:"key,omitempty" yaml:"key,omitempty"`
+	MaxKeys           int           `json:"max_keys,omitempty" yaml:"max_keys,omitempty"`
+	IdleTimeout       time.Duration `json:"idle_timeout,omitempty" yaml:"idle_timeout,omitempty"`
+}
+
+type ConcurrencyPolicy struct {
+	Max int `json:"max" yaml:"max"`
 }
 
 type Match struct {
@@ -99,8 +133,18 @@ type WorkerHandler struct {
 }
 
 type ReverseProxy struct {
-	URL         string `json:"url" yaml:"url"`
-	StripPrefix string `json:"strip_prefix,omitempty" yaml:"strip_prefix,omitempty"`
+	URL                    string        `json:"url" yaml:"url"`
+	StripPrefix            string        `json:"strip_prefix,omitempty" yaml:"strip_prefix,omitempty"`
+	RequestTimeout         time.Duration `json:"request_timeout,omitempty" yaml:"request_timeout,omitempty"`
+	DialTimeout            time.Duration `json:"dial_timeout,omitempty" yaml:"dial_timeout,omitempty"`
+	TLSHandshakeTimeout    time.Duration `json:"tls_handshake_timeout,omitempty" yaml:"tls_handshake_timeout,omitempty"`
+	ResponseHeaderTimeout  time.Duration `json:"response_header_timeout,omitempty" yaml:"response_header_timeout,omitempty"`
+	IdleConnTimeout        time.Duration `json:"idle_conn_timeout,omitempty" yaml:"idle_conn_timeout,omitempty"`
+	ExpectContinueTimeout  time.Duration `json:"expect_continue_timeout,omitempty" yaml:"expect_continue_timeout,omitempty"`
+	MaxIdleConns           int           `json:"max_idle_conns,omitempty" yaml:"max_idle_conns,omitempty"`
+	MaxIdleConnsPerHost    int           `json:"max_idle_conns_per_host,omitempty" yaml:"max_idle_conns_per_host,omitempty"`
+	MaxConnsPerHost        int           `json:"max_conns_per_host,omitempty" yaml:"max_conns_per_host,omitempty"`
+	MaxResponseHeaderBytes int64         `json:"max_response_header_bytes,omitempty" yaml:"max_response_header_bytes,omitempty"`
 }
 
 type FileServer struct {
@@ -136,7 +180,7 @@ func Load(path string) (Config, error) {
 
 	base := filepath.Dir(path)
 	for i := range cfg.Certificates {
-		def := cfg.Certificates[i]
+		def := &cfg.Certificates[i]
 		if def.CertificateFile == "" || def.PrivateKeyFile == "" {
 			continue
 		}

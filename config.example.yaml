@@ -2,8 +2,29 @@ version: 1
 
 server:
   shutdown_timeout: 10s
+  # Keep read_timeout/write_timeout at zero for streaming routes unless every
+  # request has a known upper bound. Prefer route policies for request limits.
+  read_timeout: 0s
   read_header_timeout: 5s
+  write_timeout: 0s
   idle_timeout: 60s
+  max_header_bytes: 65536
+
+policies:
+  - name: public-api
+    request:
+      max_body_bytes: 10485760
+      timeout: 30s
+    rate_limit:
+      requests_per_second: 100
+      burst: 200
+      key: client_ip
+      max_keys: 10000
+      idle_timeout: 10m
+
+  - name: expensive-api
+    concurrency:
+      max: 32
 
 listeners:
   - name: http
@@ -13,6 +34,9 @@ listeners:
   - name: https
     address: ":443"
     protocol: https
+    # X-Forwarded-For is used only when the direct peer is in this list.
+    trusted_proxies:
+      - 10.0.0.0/8
     tls:
       min_version: TLS1.2
       default_certificate: fallback
@@ -42,10 +66,19 @@ hosts:
       - name: api
         match:
           path: /api/
+        policies:
+          - public-api
+          - expensive-api
         handle:
           reverse_proxy:
             url: http://127.0.0.1:3000
             strip_prefix: /api
+            request_timeout: 30s
+            dial_timeout: 5s
+            response_header_timeout: 15s
+            max_idle_conns: 100
+            max_idle_conns_per_host: 10
+            max_conns_per_host: 200
 
       - name: application
         match:
