@@ -1,5 +1,8 @@
 # Yabber
 
+[Project website](https://lsongdev.github.io/yabber/) ·
+[Downloads](https://github.com/lsongdev/yabber/releases)
+
 Yabber is a small HTTP and HTTPS gateway for routers and home servers. It
 terminates TLS, matches requests by hostname and path, and forwards them to
 local services, Docker containers, static files, redirects or fixed
@@ -380,3 +383,5 @@ other systems is a separate layer on top of the public API:
   `-admin` and saves changes to the configuration file.
 - `web` is the panel, static files over `api`, served by `cmd/yabber`
   next to it.
+- `site` is the standalone project website, deployed to GitHub Pages by
+  [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
