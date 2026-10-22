@@ -38,10 +38,12 @@ type fakeCA struct {
 	reject       atomic.Bool  // fail every validation
 	issued       atomic.Int32
 
-	mu         sync.Mutex
-	nonce      int
-	thumbprint string
-	orders     []*fakeOrder
+	mu            sync.Mutex
+	nonce         int
+	thumbprint    string
+	orders        []*fakeOrder
+	accounts      map[string]bool // valid account URLs
+	registrations int
 }
 
 type fakeOrder struct {
@@ -53,7 +55,7 @@ type fakeOrder struct {
 
 func newFakeCA(t *testing.T) *fakeCA {
 	t.Helper()
-	ca := &fakeCA{}
+	ca := &fakeCA{accounts: make(map[string]bool)}
 	ca.rootKey, _ = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Fake ACME Root"},
@@ -76,13 +78,24 @@ func newFakeCA(t *testing.T) *fakeCA {
 		sum := sha256.Sum256(canonical)
 		ca.mu.Lock()
 		ca.thumbprint = base64.RawURLEncoding.EncodeToString(sum[:])
+		ca.registrations++
+		account := fmt.Sprintf("%s/account/%d", ca.server.URL, ca.registrations)
+		ca.accounts[account] = true
 		ca.mu.Unlock()
-		w.Header().Set("Location", ca.server.URL+"/account/1")
+		w.Header().Set("Location", account)
 		w.WriteHeader(http.StatusCreated)
 		w.Write([]byte(`{"status":"valid"}`))
 	})
 	mux.HandleFunc("POST /order", func(w http.ResponseWriter, r *http.Request) {
-		_, payload := ca.decode(t, w, r)
+		header, payload := ca.decode(t, w, r)
+		ca.mu.Lock()
+		known := ca.accounts[header.KID]
+		ca.mu.Unlock()
+		if !known {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"type":"urn:ietf:params:acme:error:accountDoesNotExist","detail":"account not found"}`))
+			return
+		}
 		var request struct{ Identifiers []struct{ Value string } }
 		json.Unmarshal(payload, &request)
 		ca.mu.Lock()
@@ -153,13 +166,25 @@ func (ca *fakeCA) setNonce(w http.ResponseWriter) {
 	ca.mu.Unlock()
 }
 
-func (ca *fakeCA) decode(t *testing.T, w http.ResponseWriter, r *http.Request) (struct{ JWK json.RawMessage }, []byte) {
+// dropAccounts forgets every account, as a CA does when one is deleted.
+func (ca *fakeCA) dropAccounts() {
+	ca.mu.Lock()
+	clear(ca.accounts)
+	ca.mu.Unlock()
+}
+
+type fakeJWSHeader struct {
+	JWK json.RawMessage
+	KID string
+}
+
+func (ca *fakeCA) decode(t *testing.T, w http.ResponseWriter, r *http.Request) (fakeJWSHeader, []byte) {
 	ca.setNonce(w)
 	var jws struct{ Protected, Payload string }
 	json.NewDecoder(r.Body).Decode(&jws)
 	protected, _ := base64.RawURLEncoding.DecodeString(jws.Protected)
 	payload, _ := base64.RawURLEncoding.DecodeString(jws.Payload)
-	var header struct{ JWK json.RawMessage }
+	var header fakeJWSHeader
 	json.Unmarshal(protected, &header)
 	return header, payload
 }
@@ -233,7 +258,7 @@ func (ca *fakeCA) rootFile(t *testing.T) string {
 	return path
 }
 
-func acmeConfig(ca *fakeCA, t *testing.T, storage string, hosts ...string) Config {
+func acmeConfig(ca *fakeCA, t *testing.T, hosts ...string) Config {
 	return Config{
 		Listeners: []Listener{
 			{Name: "http", Address: "127.0.0.1:0"},
@@ -241,7 +266,7 @@ func acmeConfig(ca *fakeCA, t *testing.T, storage string, hosts ...string) Confi
 		},
 		TLS: TLSConfig{ACME: &ACMEConfig{
 			Email: "admin@example.com", Directory: ca.server.URL + "/directory",
-			CARoot: ca.rootFile(t), Storage: storage,
+			CARoot: ca.rootFile(t),
 		}},
 		Sites: []Site{{Hosts: hosts, Handler: respond("secure")}},
 	}
@@ -265,14 +290,14 @@ func waitForCertificate(t *testing.T, server *Server, host string) CertificateSt
 
 func TestACMEObtainsServesAndReusesCertificates(t *testing.T) {
 	ca := newFakeCA(t)
-	storage := t.TempDir()
-	config := acmeConfig(ca, t, storage, "a.test", "b.test")
+	dataDir := t.TempDir()
+	config := acmeConfig(ca, t, "a.test", "b.test")
 
 	// Start without ACME to learn the HTTP address, then enable it via Apply.
 	plain := config
 	plain.TLS = TLSConfig{}
 	plain.Sites = []Site{{Hosts: []string{"a.test", "b.test"}, Listeners: []string{"http"}, Handler: respond("plain")}}
-	server := startServer(t, plain)
+	server := startServer(t, plain, WithDataDir(dataDir))
 	ca.validateAddr.Store(address(t, server, "http"))
 	if err := server.Apply(config); err != nil {
 		t.Fatal(err)
@@ -288,10 +313,10 @@ func TestACMEObtainsServesAndReusesCertificates(t *testing.T) {
 		}
 		conn.Close()
 	}
-	if info, err := os.Stat(filepath.Join(storage, "certificates")); err != nil || !info.IsDir() {
+	if info, err := os.Stat(filepath.Join(dataDir, "acme", "certificates")); err != nil || !info.IsDir() {
 		t.Fatalf("storage = %v", err)
 	}
-	keys, _ := filepath.Glob(filepath.Join(storage, "certificates", "*", "a.test.key"))
+	keys, _ := filepath.Glob(filepath.Join(dataDir, "acme", "certificates", "*", "a.test.key"))
 	if len(keys) != 1 {
 		t.Fatalf("stored keys = %v", keys)
 	}
@@ -304,7 +329,7 @@ func TestACMEObtainsServesAndReusesCertificates(t *testing.T) {
 
 	// A new server with the same storage serves stored certificates at once.
 	server.Close()
-	restarted := startServer(t, config)
+	restarted := startServer(t, config, WithDataDir(dataDir))
 	if status := waitForCertificate(t, restarted, "a.test"); status.NotAfter.IsZero() {
 		t.Fatalf("status = %#v", status)
 	}
@@ -317,9 +342,9 @@ func TestACMEObtainsServesAndReusesCertificates(t *testing.T) {
 func TestACMEFailureIsReportedAndRetriedLater(t *testing.T) {
 	ca := newFakeCA(t)
 	ca.reject.Store(true)
-	config := acmeConfig(ca, t, t.TempDir(), "fail.test")
+	config := acmeConfig(ca, t, "fail.test")
 	ca.validateAddr.Store("127.0.0.1:1")
-	server := startServer(t, config)
+	server := startServer(t, config, WithDataDir(t.TempDir()))
 	status := waitForCertificate(t, server, "fail.test")
 	if !strings.Contains(status.Error, "rejected by test") || time.Until(status.RetryAt) < 4*time.Minute {
 		t.Fatalf("status = %#v", status)
@@ -328,25 +353,36 @@ func TestACMEFailureIsReportedAndRetriedLater(t *testing.T) {
 
 func TestACMEConfigValidation(t *testing.T) {
 	ca := newFakeCA(t)
-	config := acmeConfig(ca, t, t.TempDir(), "*.wild.test")
-	if err := Validate(config); err == nil || !strings.Contains(err.Error(), "cannot issue wildcard") {
+	dataDir := WithDataDir(t.TempDir())
+	config := acmeConfig(ca, t, "*.wild.test")
+	if err := Validate(config, dataDir); err == nil || !strings.Contains(err.Error(), "cannot issue wildcard") {
 		t.Fatalf("wildcard: %v", err)
 	}
 
-	config = acmeConfig(ca, t, t.TempDir(), "a.test")
+	config = acmeConfig(ca, t, "a.test")
 	config.Listeners = config.Listeners[1:]
-	if err := Validate(config); err == nil || !strings.Contains(err.Error(), "plain HTTP listener") {
+	if err := Validate(config, dataDir); err == nil || !strings.Contains(err.Error(), "plain HTTP listener") {
 		t.Fatalf("no HTTP listener: %v", err)
 	}
 
-	config = acmeConfig(ca, t, "", "a.test")
-	if err := Validate(config); err == nil || !strings.Contains(err.Error(), "storage is required") {
-		t.Fatalf("no storage: %v", err)
+	config = acmeConfig(ca, t, "a.test")
+	if err := Validate(config); err == nil || !strings.Contains(err.Error(), "needs a data directory") {
+		t.Fatalf("no data directory: %v", err)
 	}
 
-	config = acmeConfig(ca, t, t.TempDir(), "a.test")
+	config.TLS.ACME.AccountURL = "https://ca.test/acct/1"
+	if err := Validate(config, dataDir); err == nil || !strings.Contains(err.Error(), "requires account_key") {
+		t.Fatalf("account_url without key: %v", err)
+	}
+	config.TLS.ACME.AccountURL = ""
+	config.TLS.ACME.AccountKey = filepath.Join(t.TempDir(), "missing.key")
+	if err := Validate(config, dataDir); err == nil || !strings.Contains(err.Error(), "account_key") {
+		t.Fatalf("missing account key: %v", err)
+	}
+
+	config = acmeConfig(ca, t, "a.test")
 	config.Listeners = nil
-	server := newServer(t, config)
+	server := newServer(t, config, dataDir)
 	if names := listenerNames(server); names != "http,https" {
 		t.Fatalf("default listeners with ACME = %s", names)
 	}
@@ -354,8 +390,8 @@ func TestACMEConfigValidation(t *testing.T) {
 
 func TestACMEManagerSurvivesUnrelatedApply(t *testing.T) {
 	ca := newFakeCA(t)
-	config := acmeConfig(ca, t, t.TempDir(), "a.test")
-	server := newServer(t, config)
+	config := acmeConfig(ca, t, "a.test")
+	server := newServer(t, config, WithDataDir(t.TempDir()))
 	before := server.current.Load().acme
 	config.Sites[0].Handler = respond("changed")
 	if err := server.Apply(config); err != nil {
@@ -382,28 +418,31 @@ func certPool(certificates ...*x509.Certificate) *x509.CertPool {
 	return pool
 }
 
-func TestLoadDefaultsACMEStorage(t *testing.T) {
+func TestLoadResolvesACMEPaths(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "yabber.yaml")
-	os.WriteFile(path, []byte("tls:\n  acme: {email: a@b.c}\nsites: []\n"), 0o644)
+	path := filepath.Join(dir, "config.yaml")
+	os.WriteFile(path, []byte("tls:\n  acme: {account_key: keys/account.pem, ca_root: ca.pem}\nsites: []\n"), 0o644)
 	config, err := Load(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := config.TLS.ACME.Storage; got != filepath.Join(dir, "acme") {
-		t.Fatalf("storage = %q", got)
+	if got := config.TLS.ACME.AccountKey; got != filepath.Join(dir, "keys/account.pem") {
+		t.Fatalf("account_key = %q", got)
+	}
+	if got := config.TLS.ACME.CARoot; got != filepath.Join(dir, "ca.pem") {
+		t.Fatalf("ca_root = %q", got)
 	}
 }
 
 func TestACMETakesOverFromStaleListedCertificate(t *testing.T) {
 	ca := newFakeCA(t)
-	config := acmeConfig(ca, t, t.TempDir(), "a.test", "b.test")
+	config := acmeConfig(ca, t, "a.test", "b.test")
 	config.TLS.Certificates = []Certificate{
 		writeCertificate(t, time.Now().Add(-time.Hour), "a.test"),  // expired
 		writeCertificate(t, time.Now().Add(6*time.Hour), "b.test"), // inside the grace period
 	}
 	plain := Config{Listeners: config.Listeners[:1], Sites: []Site{{Hosts: []string{"x.test"}, Handler: respond("x")}}}
-	server := startServer(t, plain)
+	server := startServer(t, plain, WithDataDir(t.TempDir()))
 	ca.validateAddr.Store(address(t, server, "http"))
 	if err := server.Apply(config); err != nil {
 		t.Fatal(err)
@@ -423,10 +462,10 @@ func TestACMETakesOverFromStaleListedCertificate(t *testing.T) {
 
 func TestRefreshPicksUpRenewedAndExpiringCertificates(t *testing.T) {
 	ca := newFakeCA(t)
-	config := acmeConfig(ca, t, t.TempDir(), "a.test")
+	config := acmeConfig(ca, t, "a.test")
 	listed := writeCertificate(t, time.Now().Add(30*24*time.Hour), "a.test")
 	config.TLS.Certificates = []Certificate{listed}
-	server := startServer(t, config)
+	server := startServer(t, config, WithDataDir(t.TempDir()))
 	if managed := server.current.Load().managedHosts; len(managed) != 0 {
 		t.Fatalf("managed = %v while a current certificate covers the host", managed)
 	}
@@ -468,7 +507,7 @@ func TestRefreshPicksUpRenewedAndExpiringCertificates(t *testing.T) {
 
 func TestReloadResetsACMEBackoff(t *testing.T) {
 	ca := newFakeCA(t)
-	manager, err := newACMEManager(ACMEConfig{Directory: ca.server.URL + "/directory", Storage: t.TempDir()}, slog.New(slog.DiscardHandler))
+	manager, err := newACMEManager(ACMEConfig{Directory: ca.server.URL + "/directory"}, t.TempDir(), slog.New(slog.DiscardHandler))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,5 +553,76 @@ func copyFile(t *testing.T, from, to string) {
 	}
 	if err := os.WriteFile(to, data, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// issueAfterAccountLoss issues a.test, drops every account at the CA, then
+// adds b.test so that the next order meets the lost account.
+func issueAfterAccountLoss(t *testing.T, ca *fakeCA, config Config, dataDir string) *Server {
+	t.Helper()
+	plain := Config{Listeners: config.Listeners[:1], Sites: []Site{{Hosts: []string{"x.test"}, Handler: respond("x")}}}
+	server := startServer(t, plain, WithDataDir(dataDir))
+	ca.validateAddr.Store(address(t, server, "http"))
+	config.Sites[0].Hosts = []string{"a.test"}
+	if err := server.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	if status := waitForCertificate(t, server, "a.test"); status.Error != "" {
+		t.Fatal(status.Error)
+	}
+	ca.dropAccounts()
+	config.Sites[0].Hosts = []string{"a.test", "b.test"}
+	if err := server.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	return server
+}
+
+func hasEvent(server *Server, level, message string) bool {
+	for _, event := range server.Events() {
+		if event.Level == level && strings.Contains(event.Message, message) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestGeneratedAccountIsReplacedVisibly(t *testing.T) {
+	ca := newFakeCA(t)
+	dataDir := t.TempDir()
+	server := issueAfterAccountLoss(t, ca, acmeConfig(ca, t, "a.test"), dataDir)
+
+	if status := waitForCertificate(t, server, "b.test"); status.Error != "" {
+		t.Fatalf("issuance after account loss: %s", status.Error)
+	}
+	if !hasEvent(server, "WARN", "registered a new one") {
+		t.Fatalf("no warning event for the replaced account: %#v", server.Events())
+	}
+	archived, _ := filepath.Glob(filepath.Join(dataDir, "acme", "accounts", "*.invalid-*"))
+	if len(archived) != 1 || ca.registrations != 2 {
+		t.Fatalf("archived = %v, registrations = %d", archived, ca.registrations)
+	}
+}
+
+func TestConfiguredAccountIsNeverReplaced(t *testing.T) {
+	ca := newFakeCA(t)
+	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(key)
+	keyFile := filepath.Join(t.TempDir(), "account.pem")
+	os.WriteFile(keyFile, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0o600)
+
+	config := acmeConfig(ca, t, "a.test")
+	config.TLS.ACME.AccountKey = keyFile
+	server := issueAfterAccountLoss(t, ca, config, t.TempDir())
+
+	status := waitForCertificate(t, server, "b.test")
+	if !strings.Contains(status.Error, "configured account") {
+		t.Fatalf("status = %#v", status)
+	}
+	if !hasEvent(server, "ERROR", "account from the configuration is no longer valid") {
+		t.Fatalf("no error event: %#v", server.Events())
+	}
+	if ca.registrations != 1 {
+		t.Fatalf("registrations = %d; the configured account was replaced", ca.registrations)
 	}
 }

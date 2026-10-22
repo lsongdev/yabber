@@ -326,7 +326,7 @@ func acmeManagerFor(config *ACMEConfig, opts *options, prev *snapshot) (*acmeMan
 	if prev != nil && prev.acme != nil && prev.acme.config == want {
 		return prev.acme, nil
 	}
-	return newACMEManager(want, opts.logger)
+	return newACMEManager(want, opts.dataDir, opts.logger)
 }
 
 func (c *compiler) route(route Route) (pattern, name string, handler http.Handler, err error) {

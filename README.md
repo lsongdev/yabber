@@ -19,21 +19,51 @@ Download a binary from the [releases](https://github.com/lsongdev/yabber/release
 go install github.com/lsongdev/yabber/cmd/yabber@latest
 make build            # dist/yabber for this machine
 make -j dist          # every platform, plus SHA256SUMS
-yabber -config /etc/yabber/yabber.yaml
 ```
+
+```sh
+yabber run -d /var/lib/yabber -c /etc/yabber/config.yaml
+yabber check -d /var/lib/yabber -c /etc/yabber/config.yaml
+yabber reload -d /var/lib/yabber
+yabber update            # or: yabber update -check
+yabber version
+```
+
+`run` is the default command. Every command takes:
 
 | Flag | Meaning |
 | --- | --- |
-| `-config` | configuration file (default `yabber.yaml`) |
-| `-check` | validate the configuration, including certificates, and exit |
-| `-admin 127.0.0.1:9180` | serve `/metrics` (Prometheus) and `/healthz` |
-| `-access-log` | write JSON access logs to stdout |
-| `-debug` | debug logging, including TLS handshake failures |
-| `-version` | print the version and exit |
+| `-d DIR` | data directory: state yabber writes (ACME accounts and certificates, `yabber.pid`) |
+| `-c FILE` | configuration file, `DIR/config.yaml` by default |
 
-`SIGHUP` reloads the configuration and certificates without dropping
-connections; an invalid file is logged and the running configuration is kept.
-`SIGINT` and `SIGTERM` drain in-flight requests and exit.
+Without `-d`, the data directory is the configuration file's directory, so
+`yabber -d /etc/yabber` and `yabber -c /etc/yabber/config.yaml` are the same.
+Keep configuration and data together on OpenWrt, where `/var` is RAM; under
+systemd, use `/etc/yabber` for configuration and `/var/lib/yabber` for data.
+
+`run` also takes `-admin 127.0.0.1:9180` (serve `/metrics` and `/healthz`),
+`-access-log` (JSON access logs on stdout) and `-debug`.
+
+**One instance per data directory.** `run` holds an exclusive lock on
+`DIR/yabber.pid`, so two instances can never share ACME state; instances with
+different directories run side by side. `reload` signals the instance holding
+the lock, and a pid file left behind by a crash is recognized as stale.
+`SIGHUP` (`systemctl reload`, `/etc/init.d/yabber reload`) does the same:
+the configuration and certificates are reloaded without dropping
+connections, and an invalid file is logged while the running configuration
+stays. `SIGINT` and `SIGTERM` drain in-flight requests and exit.
+
+**Updates.** `update` downloads the release build for this platform,
+verifies it against `SHA256SUMS`, runs it once, and atomically replaces the
+binary; restart the service afterwards. Builds on the same day share a date
+tag, so it compares checksums rather than versions.
+
+**Logs** go to stderr. Yabber writes no log files of its own: journald and
+OpenWrt's logd already keep, rotate and cap them. Access logs are off by
+default; on OpenWrt, where logd is a small RAM ring, they would push out the
+system log. Important events (certificates issued or failing, ACME account
+changes, applied configurations, listener failures) are also kept in memory
+for `Server.Events`.
 
 Inline JavaScript Worker handlers add about 10 MB to the binary and are
 opt-in: `go build -tags worker ./cmd/yabber`.
@@ -65,10 +95,18 @@ certificate (0 while a managed one is pending) and
 
 | Field | Meaning |
 | --- | --- |
-| `email` | account contact, optional |
+| `email` | contact for a generated account, optional |
 | `directory` | ACME directory; Let's Encrypt production by default. Use `https://acme-staging-v02.api.letsencrypt.org/directory` while testing. |
 | `ca_root` | PEM roots to trust for the directory, for a private CA such as step-ca |
-| `storage` | account and certificates, `acme/` beside the configuration file by default |
+| `account_key` | PEM key file of an existing account; the CA finds the account by its key |
+| `account_url` | that account's URL, optional, requires `account_key` |
+
+Accounts and certificates are stored in the data directory under `acme/`.
+Without `account_key`, Yabber generates an account; if the CA later reports it
+gone, Yabber archives it, registers a new one and logs a warning event. An
+account given with `account_key` is never replaced: if the CA rejects it,
+certificate requests fail with an error event until you fix the
+configuration.
 
 The CA must reach a plain HTTP listener on port 80 (directly or through port
 forwarding). HTTP-01 cannot issue wildcard certificates, so wildcard hosts
@@ -168,11 +206,12 @@ a listener's `trusted_proxies`.
 ## Library
 
 ```go
-config, err := yabber.Load("yabber.yaml")
+config, err := yabber.Load("/etc/yabber/config.yaml")
 if err != nil {
 	return err
 }
 server, err := yabber.New(config,
+	yabber.WithDataDir("/var/lib/yabber"),
 	yabber.WithLogger(slog.Default()),
 	yabber.WithAccessLog(os.Stdout),
 )
@@ -196,6 +235,7 @@ sent over an API as they are.
 | `Config()` | A copy of the active configuration. |
 | `Status()`, `Healthy()` | Listener state, including bind or serve errors. |
 | `Certificates()` | Every certificate in use, with expiry and the last ACME error. |
+| `Events()` | The last 256 notable events: certificates, ACME accounts, applied configurations, listener failures. |
 | `Metrics()` | Per-route counters; `WritePrometheus` renders them. |
 | `Handler(listener)` | Serve a listener through your own `http.Server`. |
 | `Shutdown(ctx)`, `Close()` | Graceful stop; remaining connections are closed when the context expires. |
@@ -203,6 +243,7 @@ sent over an API as they are.
 
 Options extend the gateway without growing the configuration schema:
 
+- `WithDataDir` sets where state is stored; `tls.acme` requires it.
 - `WithCertificateSource` supplies certificates from a database;
   `WithHTTP01Store` answers HTTP-01 challenges for an external ACME client.
 - `WithObserver` receives a `RequestRecord` for every request.

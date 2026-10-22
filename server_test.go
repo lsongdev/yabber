@@ -227,3 +227,27 @@ func TestTrustedProxyRequestID(t *testing.T) {
 		t.Fatalf("request ID = %q", id)
 	}
 }
+
+func TestEventsKeepRecentInfoAndAbove(t *testing.T) {
+	server := newServer(t, siteConfig(Site{Hosts: []string{"a.com"}, Handler: respond("a")}))
+	logger := server.opts.logger.With("component", "test")
+	logger.Debug("debug is not an event")
+	for i := range maxEvents + 10 {
+		logger.Info("event", "n", i)
+	}
+	logger.Warn("last", "detail", "x")
+	events := server.Events()
+	if len(events) != maxEvents {
+		t.Fatalf("events = %d, want %d", len(events), maxEvents)
+	}
+	first, last := events[0], events[len(events)-1]
+	if first.Attrs["n"] != "11" || last.Message != "last" || last.Level != "WARN" || last.Attrs["component"] != "test" {
+		t.Fatalf("first = %#v, last = %#v", first, last)
+	}
+	if err := server.Apply(siteConfig(Site{Hosts: []string{"b.com"}, Handler: respond("b")})); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.Events(); got[len(got)-1].Message != "configuration applied" {
+		t.Fatalf("last event = %#v", got[len(got)-1])
+	}
+}

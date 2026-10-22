@@ -58,19 +58,27 @@ type TLSConfig struct {
 // ACMEConfig obtains and renews certificates automatically from an ACME CA
 // using HTTP-01 challenges, so the CA must reach a plain HTTP listener on
 // port 80. Enabling it agrees to the CA's terms of service. Wildcard hosts
-// still need a listed certificate.
+// still need a listed certificate. Accounts and certificates are kept in the
+// server's data directory (WithDataDir).
+//
+// Without AccountKey, Yabber generates an account, stores it, and registers
+// a new one if the CA reports it gone, logging the change. With AccountKey
+// the account is yours: Yabber never replaces it, and reports an error if
+// the CA rejects it.
 type ACMEConfig struct {
-	// Email is the account contact address. Optional.
+	// Email is the contact address for a generated account. Optional.
 	Email string `yaml:"email,omitempty" json:"email,omitempty"`
+	// AccountKey is a PEM private key file of an existing account. The CA
+	// finds the account by its key, so AccountURL is optional.
+	AccountKey string `yaml:"account_key,omitempty" json:"account_key,omitempty"`
+	// AccountURL is the account's URL at the CA. It requires AccountKey.
+	AccountURL string `yaml:"account_url,omitempty" json:"account_url,omitempty"`
 	// Directory defaults to Let's Encrypt production. Use
 	// https://acme-staging-v02.api.letsencrypt.org/directory while testing.
 	Directory string `yaml:"directory,omitempty" json:"directory,omitempty"`
 	// CARoot is a PEM file of roots to trust for the directory, for private
 	// CAs such as step-ca.
 	CARoot string `yaml:"ca_root,omitempty" json:"ca_root,omitempty"`
-	// Storage holds the account and issued certificates. Load defaults it to
-	// "acme" beside the configuration file.
-	Storage string `yaml:"storage,omitempty" json:"storage,omitempty"`
 }
 
 // Certificate is a PEM certificate chain and private key on disk.
@@ -258,11 +266,8 @@ func Parse(data []byte) (Config, error) {
 
 func (c *Config) resolvePaths(base string) {
 	if acme := c.TLS.ACME; acme != nil {
-		if acme.Storage == "" {
-			acme.Storage = "acme"
-		}
-		acme.Storage = resolvePath(base, acme.Storage)
 		acme.CARoot = resolvePath(base, acme.CARoot)
+		acme.AccountKey = resolvePath(base, acme.AccountKey)
 	}
 	for i := range c.TLS.Certificates {
 		certificate := &c.TLS.Certificates[i]

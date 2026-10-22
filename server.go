@@ -87,6 +87,8 @@ type Option func(*options)
 
 type options struct {
 	logger       *slog.Logger
+	events       *eventLog
+	dataDir      string
 	certificates CertificateSource
 	http01       HTTP01Store
 	observers    []Observer
@@ -94,10 +96,17 @@ type options struct {
 	handlers     map[string]HandlerFactory
 }
 
-// WithLogger sets the logger for warnings and errors. The default discards
-// everything.
+// WithLogger sets the logger. The default discards everything; records at
+// Info and above are also kept for Events either way.
 func WithLogger(logger *slog.Logger) Option {
 	return func(o *options) { o.logger = logger }
+}
+
+// WithDataDir sets the directory where the server keeps state it writes
+// itself, such as ACME accounts and certificates. It is required with
+// tls.acme.
+func WithDataDir(dir string) Option {
+	return func(o *options) { o.dataDir = dir }
 }
 
 // WithCertificateSource adds certificates from outside the configuration.
@@ -139,6 +148,8 @@ func newOptions(list []Option) options {
 	if o.logger == nil {
 		o.logger = slog.New(slog.DiscardHandler)
 	}
+	o.events = &eventLog{}
+	o.logger = slog.New(&eventHandler{next: o.logger.Handler(), log: o.events})
 	return o
 }
 
@@ -206,6 +217,7 @@ func (s *Server) applyLocked(config Config) error {
 	}
 	if !s.started {
 		s.commitLocked(previous, next, true)
+		s.opts.logger.Info("configuration applied")
 		return nil
 	}
 
@@ -244,6 +256,7 @@ func (s *Server) applyLocked(config Config) error {
 	for name, running := range started {
 		s.running[name] = running
 	}
+	s.opts.logger.Info("configuration applied", "rebound_listeners", len(started))
 	return nil
 }
 
@@ -467,6 +480,13 @@ func (s *Server) Healthy() bool {
 		}
 	}
 	return true
+}
+
+// Events returns recent notable events, oldest first: certificate issuance
+// and failures, ACME account changes, applied configurations, listener
+// failures. It keeps the last 256.
+func (s *Server) Events() []Event {
+	return s.opts.events.list()
 }
 
 // Metrics returns request metrics accumulated since New, and the current

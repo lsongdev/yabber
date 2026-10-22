@@ -1,22 +1,24 @@
 // Command yabber runs a gateway from a YAML configuration file.
 //
-//	yabber -config /etc/yabber/yabber.yaml
+//	yabber [run]  -d /var/lib/yabber -c /etc/yabber/config.yaml
+//	yabber check  -d DIR [-c FILE]
+//	yabber reload -d DIR
+//	yabber update [-check]
+//	yabber version
 //
-// SIGHUP reloads the configuration (and certificates) without dropping
-// connections; SIGINT and SIGTERM shut down gracefully.
+// The data directory (-d) holds state yabber writes: ACME accounts and
+// certificates, and the pid file. The configuration defaults to
+// DIR/config.yaml; without -d, the data directory is the configuration's
+// directory.
 package main
 
 import (
-	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
-	"net/http"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
+	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/lsongdev/yabber"
 )
@@ -27,112 +29,100 @@ var version = "dev"
 // extensions lists optional handlers compiled in with build tags.
 var extensions []yabber.Option
 
+const usage = `usage: yabber [command] [flags]
+
+commands:
+  run       serve (default)
+  check     validate the configuration and exit
+  reload    make the running instance reload its configuration
+  update    replace this binary with the latest release
+  version   print the version
+
+Run "yabber <command> -h" for a command's flags.
+`
+
 func main() {
-	configPath := flag.String("config", "yabber.yaml", "configuration file")
-	check := flag.Bool("check", false, "validate the configuration and exit")
-	admin := flag.String("admin", "", "serve /metrics and /healthz on this address, e.g. 127.0.0.1:9180")
-	accessLog := flag.Bool("access-log", false, "write JSON access logs to stdout")
-	debug := flag.Bool("debug", false, "enable debug logging")
-	showVersion := flag.Bool("version", false, "print the version and exit")
-	flag.Parse()
-	if *showVersion {
-		fmt.Println("yabber", version)
-		return
+	args := os.Args[1:]
+	command := "run"
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command, args = args[0], args[1:]
 	}
-
-	level := slog.LevelInfo
-	if *debug {
-		level = slog.LevelDebug
+	var err error
+	switch command {
+	case "run":
+		err = runCommand(args)
+	case "check":
+		err = checkCommand(args)
+	case "reload":
+		err = reloadCommand(args)
+	case "update":
+		err = updateCommand(args)
+	case "version":
+		fmt.Println(versionString())
+	case "help":
+		fmt.Print(usage)
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", command, usage)
+		os.Exit(2)
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-
-	options := append([]yabber.Option{yabber.WithLogger(logger)}, extensions...)
-	if *accessLog {
-		options = append(options, yabber.WithAccessLog(os.Stdout))
-	}
-	if err := run(*configPath, *check, *admin, options, logger); err != nil {
-		logger.Error(err.Error())
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "yabber:", err)
 		os.Exit(1)
 	}
 }
 
-func run(configPath string, check bool, adminAddress string, options []yabber.Option, logger *slog.Logger) error {
-	config, err := yabber.Load(configPath)
-	if err != nil {
-		return err
-	}
-	if check {
-		if err := yabber.Validate(config, options...); err != nil {
-			return err
-		}
-		fmt.Println("configuration ok")
-		return nil
-	}
-
-	server, err := yabber.New(config, options...)
-	if err != nil {
-		return err
-	}
-	if err := server.Start(); err != nil {
-		return err
-	}
-	logger.Info("yabber started", "version", version)
-	for _, listener := range server.Status().Listeners {
-		logger.Info("listening", "listener", listener.Name, "address", listener.Address, "tls", listener.TLS)
-	}
-
-	var adminServer *http.Server
-	if adminAddress != "" {
-		adminServer = &http.Server{Addr: adminAddress, Handler: adminHandler(server), ReadHeaderTimeout: 10 * time.Second}
-		go func() {
-			if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				logger.Error("admin server stopped", "error", err)
-			}
-		}()
-	}
-
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
-	for sig := range signals {
-		if sig != syscall.SIGHUP {
-			break
-		}
-		if err := reload(server, configPath); err != nil {
-			logger.Error("reload failed; keeping the previous configuration", "error", err)
-		} else {
-			logger.Info("configuration reloaded")
-		}
-	}
-
-	logger.Info("shutting down")
-	if adminServer != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		_ = adminServer.Shutdown(ctx)
-	}
-	return server.Close()
+// paths are the data directory and configuration file of an instance.
+type paths struct {
+	dir, config string
 }
 
-func reload(server *yabber.Server, configPath string) error {
-	config, err := yabber.Load(configPath)
+func (p *paths) register(flags *flag.FlagSet) {
+	flags.StringVar(&p.dir, "d", "", "data directory (default: the configuration's directory)")
+	flags.StringVar(&p.config, "c", "", "configuration file (default: DIR/config.yaml)")
+}
+
+// resolve fills in whichever of the two was not given.
+func (p *paths) resolve() {
+	switch {
+	case p.dir == "" && p.config == "":
+		p.dir = "."
+	case p.dir == "":
+		p.dir = filepath.Dir(p.config)
+	}
+	if p.config == "" {
+		p.config = filepath.Join(p.dir, "config.yaml")
+	}
+}
+
+func (p paths) pidFile() string {
+	return filepath.Join(p.dir, "yabber.pid")
+}
+
+func checkCommand(args []string) error {
+	flags := flag.NewFlagSet("check", flag.ExitOnError)
+	var p paths
+	p.register(flags)
+	flags.Parse(args)
+	p.resolve()
+	config, err := yabber.Load(p.config)
 	if err != nil {
 		return err
 	}
-	return server.Apply(config)
+	if err := yabber.Validate(config, append(extensions, yabber.WithDataDir(p.dir))...); err != nil {
+		return err
+	}
+	fmt.Println("configuration ok:", p.config)
+	return nil
 }
 
-func adminHandler(server *yabber.Server) http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_ = server.Metrics().WritePrometheus(w)
-	})
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		if !server.Healthy() {
-			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
-			return
+func versionString() string {
+	revision := ""
+	if commit := buildSetting("vcs.revision", ""); len(commit) >= 7 {
+		revision = " (" + commit[:7]
+		if buildSetting("vcs.modified", "") == "true" {
+			revision += "+dirty"
 		}
-		_, _ = w.Write([]byte("ok\n"))
-	})
-	return mux
+		revision += ")"
+	}
+	return fmt.Sprintf("yabber %s%s %s/%s %s", version, revision, runtime.GOOS, runtime.GOARCH, runtime.Version())
 }

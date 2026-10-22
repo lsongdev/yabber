@@ -117,9 +117,12 @@ type acmeFailure struct {
 	retryAt  time.Time
 }
 
-func newACMEManager(config ACMEConfig, logger *slog.Logger) (*acmeManager, error) {
-	if config.Storage == "" {
-		return nil, errors.New("tls.acme.storage is required")
+func newACMEManager(config ACMEConfig, dataDir string, logger *slog.Logger) (*acmeManager, error) {
+	if dataDir == "" {
+		return nil, errors.New("tls.acme needs a data directory (WithDataDir, or -d for the command)")
+	}
+	if config.AccountURL != "" && config.AccountKey == "" {
+		return nil, errors.New("tls.acme.account_url requires account_key")
 	}
 	if config.Directory == "" {
 		config.Directory = letsEncryptDirectory
@@ -147,13 +150,23 @@ func newACMEManager(config ACMEConfig, logger *slog.Logger) (*acmeManager, error
 		return nil, err
 	}
 	client.HTTPClient = httpClient
+	if config.AccountKey != "" {
+		key, err := os.ReadFile(config.AccountKey)
+		if err != nil {
+			return nil, fmt.Errorf("tls.acme.account_key: %w", err)
+		}
+		if err := client.ImportKey(string(key)); err != nil {
+			return nil, fmt.Errorf("tls.acme.account_key %s: %w", config.AccountKey, err)
+		}
+	}
+	storage := filepath.Join(dataDir, "acme")
 	name := strings.ReplaceAll(directory.Host, ":", "_")
 	return &acmeManager{
 		config:      config,
 		logger:      logger,
 		client:      client,
-		accountPath: filepath.Join(config.Storage, "accounts", name+".json"),
-		certDir:     filepath.Join(config.Storage, "certificates", name),
+		accountPath: filepath.Join(storage, "accounts", name+".json"),
+		certDir:     filepath.Join(storage, "certificates", name),
 		certs:       make(map[string]*tls.Certificate),
 		failures:    make(map[string]*acmeFailure),
 		tokens:      make(map[string]string),
@@ -315,9 +328,14 @@ func (m *acmeManager) obtain(ctx context.Context, host string) (*tls.Certificate
 	if err := m.ensureAccount(ctx); err != nil {
 		return nil, fmt.Errorf("account: %w", err)
 	}
-	orderURL, order, err := m.client.CreateOrder(ctx, &acme.OrderRequest{
-		Identifiers: []acme.Identifier{{Type: "dns", Value: host}},
-	})
+	request := &acme.OrderRequest{Identifiers: []acme.Identifier{{Type: "dns", Value: host}}}
+	orderURL, order, err := m.client.CreateOrder(ctx, request)
+	if accountGone(err) {
+		if err := m.replaceAccount(ctx, err); err != nil {
+			return nil, err
+		}
+		orderURL, order, err = m.client.CreateOrder(ctx, request)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
 	}
@@ -414,10 +432,24 @@ type acmeAccount struct {
 	Key string `json:"key"`
 }
 
-// ensureAccount loads the stored account or registers a new one, agreeing
-// to the CA's terms of service.
+// ensureAccount resolves the configured account, or loads the stored
+// generated account, or registers a new one, agreeing to the CA's terms of
+// service.
 func (m *acmeManager) ensureAccount(ctx context.Context) error {
 	if m.client.AccountURL != "" {
+		return nil
+	}
+	if m.config.AccountKey != "" {
+		if m.config.AccountURL != "" {
+			m.client.AccountURL = m.config.AccountURL
+			return nil
+		}
+		// Registering an existing key returns that key's account.
+		accountURL, _, err := m.client.Register(ctx, &acme.AccountRequest{TermsOfServiceAgreed: true, Contact: []string{}})
+		if err != nil {
+			return err
+		}
+		m.logger.Info("ACME account resolved from tls.acme.account_key", "account", accountURL)
 		return nil
 	}
 	data, err := os.ReadFile(m.accountPath)
@@ -456,6 +488,44 @@ func (m *acmeManager) ensureAccount(ctx context.Context) error {
 	}
 	m.logger.Info("ACME account registered", "directory", m.config.Directory, "account", accountURL)
 	return writeFileAtomic(m.accountPath, data, 0o600)
+}
+
+// accountGone reports whether the CA no longer accepts the account.
+func accountGone(err error) bool {
+	var problem *acme.Response
+	if !errors.As(err, &problem) {
+		return false
+	}
+	switch problem.Type {
+	case "urn:ietf:params:acme:error:accountDoesNotExist":
+		return true
+	case "urn:ietf:params:acme:error:unauthorized":
+		return strings.Contains(strings.ToLower(problem.Detail), "account")
+	}
+	return false
+}
+
+// replaceAccount handles an account the CA has rejected. A configured
+// account is never replaced; a generated one is archived and registered
+// anew, with a warning so the change is visible.
+func (m *acmeManager) replaceAccount(ctx context.Context, cause error) error {
+	old := m.client.AccountURL
+	if m.config.AccountKey != "" {
+		m.logger.Error("ACME account from the configuration is no longer valid; fix tls.acme.account_key and account_url",
+			"account", old, "error", cause)
+		return fmt.Errorf("configured account %s is no longer valid: %w", old, cause)
+	}
+	archive := fmt.Sprintf("%s.invalid-%s", m.accountPath, time.Now().UTC().Format("20060102T150405Z"))
+	if err := os.Rename(m.accountPath, archive); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	m.client.AccountURL = ""
+	if err := m.ensureAccount(ctx); err != nil {
+		return fmt.Errorf("register replacement account: %w", err)
+	}
+	m.logger.Warn("ACME account was no longer valid; registered a new one",
+		"old_account", old, "new_account", m.client.AccountURL, "archived", archive, "cause", cause)
+	return nil
 }
 
 // writeFileAtomic replaces path so that readers never see a partial file.

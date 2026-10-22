@@ -13,7 +13,8 @@ tls:
   acme:
     email: admin@example.com
     # directory: https://acme-staging-v02.api.letsencrypt.org/directory
-    # storage: acme
+    # Use an existing account instead of generating one:
+    # account_key: acme-account.pem
 
 # Optional. Listeners default to http on :80 (and https on :443 when any
 # certificate exists).
