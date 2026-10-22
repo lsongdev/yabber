@@ -1,11 +1,11 @@
 package main
 
 import (
-	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -20,25 +20,40 @@ import (
 	"time"
 )
 
-var releasesURL = "https://api.github.com/repos/lsongdev/yabber/releases"
+// releaseKey verifies SHA256SUMS.sig. Its private half signs releases in CI
+// (tools/sign), so files are checked the same way whether they come from
+// GitHub or from a mirror.
+const releaseKey = "ZD30+ASsK/qKYEJ6xj2S7qb/sBKa/p6giw4fxjHNVfE="
 
-type release struct {
-	TagName string `json:"tag_name"`
-	Assets  []struct {
-		Name string `json:"name"`
-		URL  string `json:"browser_download_url"`
-	} `json:"assets"`
+var (
+	releasePublicKey = mustDecodeKey(releaseKey)
+	releasesURL      = "https://github.com/lsongdev/yabber/releases"
+)
+
+func mustDecodeKey(encoded string) ed25519.PublicKey {
+	key, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		panic("invalid release key")
+	}
+	return key
 }
 
 // updateCommand replaces the running binary with a release build for the
-// same platform. Several builds can share a date tag, so whether an update
-// is needed is decided by the binary's SHA-256, not the version string.
+// same platform, after verifying the release's signed checksums. Several
+// builds can share a date tag, so whether an update is needed is decided by
+// the binary's SHA-256, not the version string.
 func updateCommand(args []string) error {
 	flags := flag.NewFlagSet("update", flag.ExitOnError)
 	check := flags.Bool("check", false, "only report whether an update is available")
 	tag := flags.String("version", "", "release to install (default: latest)")
+	mirror := flags.String("mirror", os.Getenv("YABBER_MIRROR"),
+		"URL of a directory holding one release's files, instead of GitHub (default $YABBER_MIRROR)")
 	flags.Parse(args)
 
+	base, err := releaseBase(*mirror, *tag)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	executable, err := os.Executable()
@@ -49,28 +64,24 @@ func updateCommand(args []string) error {
 		return err
 	}
 	asset := assetName()
-	rel, err := fetchRelease(ctx, *tag)
+	sums, err := verifiedChecksums(ctx, base, releasePublicKey)
 	if err != nil {
 		return err
 	}
-	binaryURL, sumsURL := rel.asset(asset), rel.asset("SHA256SUMS")
-	if binaryURL == "" || sumsURL == "" {
-		return fmt.Errorf("release %s has no %s or SHA256SUMS", rel.TagName, asset)
-	}
-	want, err := releaseChecksum(ctx, sumsURL, asset)
-	if err != nil {
-		return err
+	want, ok := sums[asset]
+	if !ok {
+		return fmt.Errorf("the release has no %s", asset)
 	}
 	if current, err := fileSHA256(executable); err == nil && current == want {
-		fmt.Printf("already up to date: %s (%s)\n", rel.TagName, asset)
+		fmt.Printf("already up to date (%s)\n", asset)
 		return nil
 	}
 	if *check {
-		fmt.Printf("update available: %s -> %s (%s)\n", version, rel.TagName, asset)
+		fmt.Printf("update available: %s from %s\n", asset, base)
 		return nil
 	}
 
-	staged, err := download(ctx, binaryURL, filepath.Dir(executable), want)
+	staged, err := download(ctx, base+"/"+asset, filepath.Dir(executable), want)
 	if err != nil {
 		return err
 	}
@@ -78,7 +89,7 @@ func updateCommand(args []string) error {
 	// Smoke test before replacing anything: the new binary must start here.
 	out, err := exec.CommandContext(ctx, staged, "version").CombinedOutput()
 	if err != nil || !strings.HasPrefix(string(out), "yabber ") {
-		return fmt.Errorf("downloaded %s failed `version` (%v): %s", rel.TagName, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("the downloaded binary failed `version` (%v): %s", err, strings.TrimSpace(string(out)))
 	}
 	if err := replaceExecutable(staged, executable); err != nil {
 		return err
@@ -86,6 +97,53 @@ func updateCommand(args []string) error {
 	fmt.Printf("updated %s: %s -> %s", executable, version, out)
 	fmt.Println(restartHint())
 	return nil
+}
+
+// releaseBase is the URL of the directory holding the release's files.
+func releaseBase(mirror, tag string) (string, error) {
+	switch {
+	case mirror != "" && tag != "":
+		return "", errors.New("-version does not apply to a mirror; point -mirror at that release's files")
+	case mirror != "":
+		return strings.TrimSuffix(mirror, "/"), nil
+	case tag != "":
+		return releasesURL + "/download/" + tag, nil
+	default:
+		return releasesURL + "/latest/download", nil
+	}
+}
+
+// verifiedChecksums fetches SHA256SUMS and its signature from base and
+// returns the checksums by file name, refusing them unless key signed them.
+func verifiedChecksums(ctx context.Context, base string, key ed25519.PublicKey) (map[string]string, error) {
+	sums, err := fetch(ctx, base+"/SHA256SUMS", 1<<20)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := fetch(ctx, base+"/SHA256SUMS.sig", 1<<10)
+	if err != nil {
+		return nil, err
+	}
+	signature, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(encoded)))
+	if err != nil || !ed25519.Verify(key, sums, signature) {
+		return nil, errors.New("SHA256SUMS is not signed by the yabber release key; refusing to update")
+	}
+	checksums := make(map[string]string)
+	for _, line := range strings.Split(string(sums), "\n") {
+		if sum, name, ok := strings.Cut(line, "  "); ok {
+			checksums[name] = sum
+		}
+	}
+	return checksums, nil
+}
+
+func fetch(ctx context.Context, url string, limit int64) ([]byte, error) {
+	body, err := get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	return io.ReadAll(io.LimitReader(body, limit))
 }
 
 // assetName is the release file built for this platform, matching the
@@ -113,47 +171,6 @@ func buildSetting(key, fallback string) string {
 		}
 	}
 	return fallback
-}
-
-func fetchRelease(ctx context.Context, tag string) (*release, error) {
-	url := releasesURL + "/latest"
-	if tag != "" {
-		url = releasesURL + "/tags/" + tag
-	}
-	body, err := get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-	var rel release
-	if err := json.NewDecoder(body).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("decode release: %w", err)
-	}
-	return &rel, nil
-}
-
-func (r *release) asset(name string) string {
-	for _, asset := range r.Assets {
-		if asset.Name == name {
-			return asset.URL
-		}
-	}
-	return ""
-}
-
-func releaseChecksum(ctx context.Context, url, asset string) (string, error) {
-	body, err := get(ctx, url)
-	if err != nil {
-		return "", err
-	}
-	defer body.Close()
-	scanner := bufio.NewScanner(body)
-	for scanner.Scan() {
-		if sum, name, ok := strings.Cut(scanner.Text(), "  "); ok && name == asset {
-			return sum, nil
-		}
-	}
-	return "", fmt.Errorf("SHA256SUMS has no entry for %s", asset)
 }
 
 // download saves url into dir, verifying its SHA-256, and returns the path.

@@ -37,10 +37,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: Build
+      - name: Build and sign
+        env:
+          YABBER_SIGNING_KEY: ${{ secrets.YABBER_SIGNING_KEY }}
         run: |
+          test -n "$YABBER_SIGNING_KEY" || { echo "YABBER_SIGNING_KEY secret is missing" >&2; exit 1; }
           echo "VERSION=$(date -u +%Y.%m.%d)" >> "$GITHUB_ENV"
           make -j4 dist VERSION="$(date -u +%Y.%m.%d)"
+          test -s dist/SHA256SUMS.sig
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,4 +54,4 @@ jobs:
           gh release create "$VERSION" dist/* \
             --target "$GITHUB_SHA" \
             --title "$VERSION" \
-            --notes "Built from ${GITHUB_SHA::7}. Verify downloads with SHA256SUMS."
+            --notes "Built from ${GITHUB_SHA::7}. SHA256SUMS lists every file and is signed in SHA256SUMS.sig."

@@ -12,8 +12,15 @@ PROG=/usr/bin/yabber
 DATA=/etc/yabber
 
 start_service() {
+	# /etc/config/yabber: option admin '192.168.1.1:9180' serves the panel and
+	# API there (keep it on the LAN). Apply with: /etc/init.d/yabber restart
+	config_load yabber
+	local admin
+	config_get admin main admin
+
 	procd_open_instance
 	procd_set_param command "$PROG" run -d "$DATA"
+	[ -n "$admin" ] && procd_append_param command -admin "$admin"
 	procd_set_param respawn 3600 5 5
 	procd_set_param stdout 1
 	procd_set_param stderr 1

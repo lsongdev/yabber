@@ -27,8 +27,18 @@ release's `SHA256SUMS`, and installs a service:
 A first install writes a starter configuration and leaves the service
 stopped; running the installer again upgrades the binary and service files
 and restarts the service without touching the configuration. `-v VERSION`
-installs a specific release, `-n` only the binary. On OpenWrt, move LuCI off
-ports 80 and 443 first (the installer prints how).
+installs a specific release, `-n` only the binary, and `YABBER_MIRROR` points
+it at a mirror. The installer checks the release signature when `openssl`
+supports Ed25519 (`opkg install openssl-util` on OpenWrt) and refuses a mirror
+it cannot verify.
+
+On OpenWrt, move LuCI off ports 80 and 443 first (the installer prints how).
+To serve the [management panel](#management-panel) on the LAN, set the
+address in `/etc/config/yabber` and restart:
+
+```sh
+uci set yabber.main.admin=192.168.1.1:9180 && uci commit yabber && /etc/init.d/yabber restart
+```
 
 ## Command
 
@@ -79,6 +89,18 @@ stays. `SIGINT` and `SIGTERM` drain in-flight requests and exit.
 verifies it against `SHA256SUMS`, runs it once, and atomically replaces the
 binary; restart the service afterwards. Builds on the same day share a date
 tag, so it compares checksums rather than versions.
+
+Releases are signed: CI signs `SHA256SUMS` with an Ed25519 key
+(`SHA256SUMS.sig`) whose public half is compiled into yabber, and `update`
+refuses anything it cannot verify. That makes any mirror safe to use, such as
+a GitHub proxy where GitHub itself is slow or blocked:
+
+```sh
+yabber update -mirror https://ghfast.top/https://github.com/lsongdev/yabber/releases/latest/download
+# or set YABBER_MIRROR, which install.sh honors too
+```
+
+A mirror is a URL of a directory holding one release's files.
 
 **Logs** go to stderr. Yabber writes no log files of its own: journald and
 OpenWrt's logd already keep, rotate and cap them. Access logs are off by

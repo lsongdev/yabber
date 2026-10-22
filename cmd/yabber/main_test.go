@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -59,46 +61,93 @@ func TestPidFileLocksTheDataDirectory(t *testing.T) {
 	}
 }
 
-func TestUpdateVerifiesChecksums(t *testing.T) {
-	binary := []byte("#!/bin/sh\necho yabber test\n")
-	sum := sha256.Sum256(binary)
-	asset := assetName()
+// signedRelease serves SHA256SUMS signed by key, plus the given files.
+func signedRelease(t *testing.T, key ed25519.PrivateKey, files map[string][]byte) *httptest.Server {
+	t.Helper()
+	var sums strings.Builder
+	for name, data := range files {
+		sum := sha256.Sum256(data)
+		fmt.Fprintf(&sums, "%s  %s\n", hex.EncodeToString(sum[:]), name)
+	}
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(key, []byte(sums.String())))
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/releases/latest":
-			fmt.Fprintf(w, `{"tag_name":"2026.10.22","assets":[{"name":%q,"browser_download_url":"%[2]s/bin"},{"name":"SHA256SUMS","browser_download_url":"%[2]s/sums"}]}`,
-				asset, "http://"+r.Host)
-		case "/sums":
-			fmt.Fprintf(w, "%s  %s\n%s  other\n", hex.EncodeToString(sum[:]), asset, strings.Repeat("0", 64))
-		case "/bin":
-			w.Write(binary)
+		switch name := strings.TrimPrefix(r.URL.Path, "/release/"); name {
+		case "SHA256SUMS":
+			w.Write([]byte(sums.String()))
+		case "SHA256SUMS.sig":
+			w.Write([]byte(signature + "\n"))
+		default:
+			data, ok := files[name]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Write(data)
 		}
 	}))
-	defer server.Close()
-	releasesURL = server.URL + "/releases"
+	t.Cleanup(server.Close)
+	return server
+}
+
+func TestUpdateRequiresSignedChecksums(t *testing.T) {
+	public, private, _ := ed25519.GenerateKey(nil)
+	_, other, _ := ed25519.GenerateKey(nil)
+	binary := []byte("#!/bin/sh\necho yabber test\n")
+	asset := assetName()
 	ctx := context.Background()
 
-	rel, err := fetchRelease(ctx, "")
-	if err != nil || rel.TagName != "2026.10.22" {
-		t.Fatalf("release = %#v, %v", rel, err)
+	server := signedRelease(t, private, map[string][]byte{asset: binary})
+	sums, err := verifiedChecksums(ctx, server.URL+"/release", public)
+	if err != nil {
+		t.Fatal(err)
 	}
-	want, err := releaseChecksum(ctx, rel.asset("SHA256SUMS"), asset)
-	if err != nil || want != hex.EncodeToString(sum[:]) {
-		t.Fatalf("checksum = %q, %v", want, err)
-	}
+	want := sums[asset]
 	dir := t.TempDir()
-	staged, err := download(ctx, rel.asset(asset), dir, want)
+	staged, err := download(ctx, server.URL+"/release/"+asset, dir, want)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := fileSHA256(staged); got != want {
 		t.Fatalf("staged checksum = %s", got)
 	}
-	if _, err := download(ctx, rel.asset(asset), dir, strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+	if _, err := download(ctx, server.URL+"/release/"+asset, dir, strings.Repeat("0", 64)); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("tampered download: %v", err)
 	}
-	if leftovers, _ := filepath.Glob(filepath.Join(dir, ".yabber-update-*")); len(leftovers) != 1 {
-		t.Fatalf("files after a rejected download = %v, want only the first staged one", leftovers)
+
+	// A mirror signing with any other key is refused.
+	forged := signedRelease(t, other, map[string][]byte{asset: []byte("evil")})
+	if _, err := verifiedChecksums(ctx, forged.URL+"/release", public); err == nil || !strings.Contains(err.Error(), "not signed") {
+		t.Fatalf("forged release: %v", err)
+	}
+	// So is a release without a signature.
+	unsigned := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".sig") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Write([]byte("0000  " + asset + "\n"))
+	}))
+	defer unsigned.Close()
+	if _, err := verifiedChecksums(ctx, unsigned.URL, public); err == nil {
+		t.Fatal("unsigned release accepted")
+	}
+}
+
+func TestReleaseBase(t *testing.T) {
+	for _, test := range []struct{ mirror, tag, want string }{
+		{"", "", releasesURL + "/latest/download"},
+		{"", "2026.10.22", releasesURL + "/download/2026.10.22"},
+		{"https://mirror.example/yabber/latest/", "", "https://mirror.example/yabber/latest"},
+	} {
+		if got, err := releaseBase(test.mirror, test.tag); err != nil || got != test.want {
+			t.Errorf("releaseBase(%q, %q) = %q, %v", test.mirror, test.tag, got, err)
+		}
+	}
+	if _, err := releaseBase("https://mirror.example", "2026.10.22"); err == nil {
+		t.Error("-version with -mirror accepted")
+	}
+	if len(releasePublicKey) != ed25519.PublicKeySize {
+		t.Error("embedded release key is invalid")
 	}
 }
 

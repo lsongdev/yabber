@@ -11,8 +11,10 @@
 # data in /var/lib/yabber. Running it again upgrades the
 # binary and service files; an existing configuration is never touched.
 #
-# YABBER_BASE_URL replaces the download location, for a mirror that holds
-# the same release files.
+# YABBER_MIRROR replaces the download location with a directory holding one
+# release's files. SHA256SUMS is signed by the yabber release key; the
+# signature is checked when openssl supports Ed25519, and a mirror is only
+# trusted when it is.
 
 set -eu
 
@@ -52,7 +54,11 @@ if [ "$VERSION" = latest ]; then
 else
 	BASE=https://github.com/$REPO/releases/download/$VERSION
 fi
-BASE=${YABBER_BASE_URL:-$BASE}
+BASE=${YABBER_MIRROR:-$BASE}
+
+RELEASE_KEY='-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEAZD30+ASsK/qKYEJ6xj2S7qb/sBKa/p6giw4fxjHNVfE=
+-----END PUBLIC KEY-----'
 
 fetch() {
 	if command -v curl >/dev/null 2>&1; then
@@ -78,6 +84,24 @@ download() {
 	want=$(awk -v name="$1" '$2 == name { print $1 }' "$TMP/SHA256SUMS")
 	[ -n "$want" ] || die "SHA256SUMS has no entry for $1"
 	[ "$(sha256 "$2")" = "$want" ] || die "checksum mismatch for $1"
+}
+
+# verify_signature checks SHA256SUMS against the release key. Without an
+# Ed25519-capable openssl it relies on HTTPS from GitHub and refuses mirrors.
+verify_signature() {
+	if command -v openssl >/dev/null 2>&1 &&
+		printf '%s\n' "$RELEASE_KEY" >"$TMP/release.pem" &&
+		openssl pkey -pubin -in "$TMP/release.pem" -noout >/dev/null 2>&1; then
+		fetch "$BASE/SHA256SUMS.sig" "$TMP/SHA256SUMS.sig"
+		if ! openssl base64 -d -A -in "$TMP/SHA256SUMS.sig" -out "$TMP/SHA256SUMS.bin" ||
+			! openssl pkeyutl -verify -pubin -inkey "$TMP/release.pem" -rawin \
+				-in "$TMP/SHA256SUMS" -sigfile "$TMP/SHA256SUMS.bin" >/dev/null 2>&1; then
+			die "SHA256SUMS is not signed by the yabber release key"
+		fi
+		say "release signature verified"
+	elif [ -n "${YABBER_MIRROR:-}" ]; then
+		die "cannot verify the release signature (openssl with Ed25519 is needed) and will not trust a mirror without it"
+	fi
 }
 
 little_endian() {
@@ -133,6 +157,7 @@ fi
 ASSET=$(asset_name)
 say "installing $ASSET ($VERSION) for $PLATFORM"
 fetch "$BASE/SHA256SUMS" "$TMP/SHA256SUMS"
+verify_signature
 download "$ASSET" "$TMP/yabber"
 chmod 755 "$TMP/yabber"
 "$TMP/yabber" version >/dev/null 2>&1 || die "the downloaded binary does not run on this machine"
@@ -162,6 +187,14 @@ openwrt)
 	download yabber.init "$TMP/yabber.init"
 	cp "$TMP/yabber.init" /etc/init.d/yabber
 	chmod 755 /etc/init.d/yabber
+	if [ ! -e /etc/config/yabber ]; then
+		cat >/etc/config/yabber <<'EOF'
+config yabber 'main'
+	# Serve the management panel and API on this address, for example the
+	# LAN address of the router: option admin '192.168.1.1:9180'
+	option admin ''
+EOF
+	fi
 	for path in /usr/bin/yabber /etc/init.d/yabber /etc/yabber/; do
 		grep -qxF "$path" /etc/sysupgrade.conf 2>/dev/null || echo "$path" >>/etc/sysupgrade.conf
 	done
