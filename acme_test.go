@@ -11,8 +11,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -390,5 +392,127 @@ func TestLoadDefaultsACMEStorage(t *testing.T) {
 	}
 	if got := config.TLS.ACME.Storage; got != filepath.Join(dir, "acme") {
 		t.Fatalf("storage = %q", got)
+	}
+}
+
+func TestACMETakesOverFromStaleListedCertificate(t *testing.T) {
+	ca := newFakeCA(t)
+	config := acmeConfig(ca, t, t.TempDir(), "a.test", "b.test")
+	config.TLS.Certificates = []Certificate{
+		writeCertificate(t, time.Now().Add(-time.Hour), "a.test"),  // expired
+		writeCertificate(t, time.Now().Add(6*time.Hour), "b.test"), // inside the grace period
+	}
+	plain := Config{Listeners: config.Listeners[:1], Sites: []Site{{Hosts: []string{"x.test"}, Handler: respond("x")}}}
+	server := startServer(t, plain)
+	ca.validateAddr.Store(address(t, server, "http"))
+	if err := server.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	if got := server.current.Load().managedHosts; strings.Join(got, ",") != "a.test,b.test" {
+		t.Fatalf("managed = %v", got)
+	}
+	for _, host := range []string{"a.test", "b.test"} {
+		waitForCertificate(t, server, host)
+		conn, err := tls.Dial("tcp", address(t, server, "https"), &tls.Config{ServerName: host, RootCAs: certPool(ca.root)})
+		if err != nil {
+			t.Fatalf("%s: ACME certificate not preferred over the stale one: %v", host, err)
+		}
+		conn.Close()
+	}
+}
+
+func TestRefreshPicksUpRenewedAndExpiringCertificates(t *testing.T) {
+	ca := newFakeCA(t)
+	config := acmeConfig(ca, t, t.TempDir(), "a.test")
+	listed := writeCertificate(t, time.Now().Add(30*24*time.Hour), "a.test")
+	config.TLS.Certificates = []Certificate{listed}
+	server := startServer(t, config)
+	if managed := server.current.Load().managedHosts; len(managed) != 0 {
+		t.Fatalf("managed = %v while a current certificate covers the host", managed)
+	}
+	served := func() time.Time {
+		conn, err := tls.Dial("tcp", address(t, server, "https"), &tls.Config{ServerName: "a.test", InsecureSkipVerify: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		return conn.ConnectionState().PeerCertificates[0].NotAfter
+	}
+	before := served()
+
+	// certbot-style renewal: the same paths now hold a newer certificate.
+	renewed := writeCertificate(t, time.Now().Add(90*24*time.Hour), "a.test")
+	copyFile(t, renewed.Cert, listed.Cert)
+	copyFile(t, renewed.Key, listed.Key)
+	server.mu.Lock()
+	err := server.refreshCertificatesLocked()
+	server.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after := served(); !after.After(before) {
+		t.Fatalf("refresh kept serving the old certificate (%v)", after)
+	}
+
+	// The listed certificate is about to expire: ACME takes the host over.
+	expiring := writeCertificate(t, time.Now().Add(time.Hour), "a.test")
+	copyFile(t, expiring.Cert, listed.Cert)
+	copyFile(t, expiring.Key, listed.Key)
+	server.mu.Lock()
+	server.refreshCertificatesLocked()
+	server.mu.Unlock()
+	if managed := server.current.Load().managedHosts; strings.Join(managed, ",") != "a.test" {
+		t.Fatalf("managed after expiry = %v", managed)
+	}
+}
+
+func TestReloadResetsACMEBackoff(t *testing.T) {
+	ca := newFakeCA(t)
+	manager, err := newACMEManager(ACMEConfig{Directory: ca.server.URL + "/directory", Storage: t.TempDir()}, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 4 {
+		manager.recordFailure("a.test", errors.New("dns not ready"))
+	}
+	failedAt := manager.failures["a.test"].failedAt
+	if wait := time.Until(manager.retryAt("a.test")); wait < 30*time.Minute {
+		t.Fatalf("backoff after four failures = %v", wait)
+	}
+
+	manager.setHosts([]string{"a.test"}, false)
+	if wait := time.Until(manager.retryAt("a.test")); wait < 30*time.Minute {
+		t.Fatalf("a refresh reset the backoff: %v", wait)
+	}
+	manager.setHosts([]string{"a.test"}, true)
+	if got := manager.retryAt("a.test"); !got.Equal(failedAt.Add(acmeReloadRetry)) {
+		t.Fatalf("retry after reload = %v, want one minute after the last failure", got.Sub(failedAt))
+	}
+	if retryAt := manager.recordFailure("a.test", errors.New("again")); time.Until(retryAt) > acmeMinRetry {
+		t.Fatalf("backoff did not restart from the minimum: %v", time.Until(retryAt))
+	}
+}
+
+func TestCertificateMetrics(t *testing.T) {
+	config := tlsConfig(Site{Hosts: []string{"a.com"}, Handler: respond("a")})
+	config.TLS.Certificates = []Certificate{writeCertificate(t, time.Now().Add(48*time.Hour), "a.com")}
+	server := newServer(t, config)
+	var text strings.Builder
+	if err := server.Metrics().WritePrometheus(&text); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text.String(), `yabber_certificate_expiry_timestamp_seconds{names="a.com",managed="false"} `) {
+		t.Fatalf("prometheus = %s", text.String())
+	}
+}
+
+func copyFile(t *testing.T, from, to string) {
+	t.Helper()
+	data, err := os.ReadFile(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(to, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

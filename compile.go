@@ -17,12 +17,14 @@ type snapshot struct {
 	config     Config
 	server     ServerConfig // config.Server with defaults applied
 	listeners  map[string]*listenerRuntime
-	certs      *certificateTable
+	certs      *certificateStore
 	minTLS     uint16
 	policies   map[string]*compiledPolicy
 	transports map[transportKey]*http.Transport
-	// acme manages certificates for managedHosts, the TLS hosts that no
-	// static certificate covers.
+	// tlsHosts are all hosts served on TLS listeners. acme manages
+	// certificates for managedHosts, those no current listed certificate
+	// covers; see managedHosts.
+	tlsHosts     []string
 	acme         *acmeManager
 	managedHosts []string
 }
@@ -48,10 +50,10 @@ type siteEntry struct {
 }
 
 type compiler struct {
-	opts    *options
-	prev    *snapshot
-	snap    *snapshot
-	managed map[string]bool
+	opts     *options
+	prev     *snapshot
+	snap     *snapshot
+	tlsHosts map[string]bool
 }
 
 // compile validates cfg and builds a snapshot. State that should outlive a
@@ -86,7 +88,7 @@ func compile(cfg Config, opts *options, prev *snapshot) (*snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := &compiler{opts: opts, prev: prev, managed: make(map[string]bool), snap: &snapshot{
+	c := &compiler{opts: opts, prev: prev, tlsHosts: make(map[string]bool), snap: &snapshot{
 		config:     cfg,
 		server:     server,
 		listeners:  make(map[string]*listenerRuntime),
@@ -114,11 +116,10 @@ func compile(cfg Config, opts *options, prev *snapshot) (*snapshot, error) {
 			return nil, fmt.Errorf("site %q: %w", siteLabel(site, i), err)
 		}
 	}
-	if len(c.managed) > 0 {
-		if !slices.ContainsFunc(listeners, func(l Listener) bool { return !l.TLS }) {
-			return nil, errors.New("tls.acme needs a plain HTTP listener to answer HTTP-01 challenges")
-		}
-		c.snap.managedHosts = slices.Sorted(maps.Keys(c.managed))
+	c.snap.tlsHosts = slices.Sorted(maps.Keys(c.tlsHosts))
+	c.snap.managedHosts = managedHosts(c.snap.tlsHosts, certs, manager)
+	if len(c.snap.managedHosts) > 0 && !slices.ContainsFunc(listeners, func(l Listener) bool { return !l.TLS }) {
+		return nil, errors.New("tls.acme needs a plain HTTP listener to answer HTTP-01 challenges")
 	}
 	for _, listener := range listeners {
 		handler, err := applyPolicies(hostDispatcher{tables[listener.Name]}, listener.Policies, policies)
@@ -282,19 +283,34 @@ func (c *compiler) site(site Site, listeners []Listener, byName map[string]Liste
 	return nil
 }
 
-// requireCertificate checks that a TLS host is covered by a static
-// certificate, or else hands it to ACME.
+// requireCertificate checks that a TLS host can be served: by a current
+// listed certificate, by ACME, or at worst by a stale listed certificate.
 func (c *compiler) requireCertificate(host, listener string) error {
+	c.tlsHosts[host] = true
+	certs := c.snap.certs
 	switch {
-	case covers(c.snap.certs, host):
+	case covers(certs.current, host), c.snap.acme != nil && acmeEligible(host), covers(certs.stale, host):
 		return nil
 	case c.snap.acme == nil:
 		return fmt.Errorf("no certificate covers %q on TLS listener %q; add one or enable tls.acme", host, listener)
-	case !acmeEligible(host):
+	default:
 		return fmt.Errorf("no certificate covers %q on TLS listener %q, and ACME HTTP-01 cannot issue wildcard or IP certificates", host, listener)
 	}
-	c.managed[host] = true
-	return nil
+}
+
+// managedHosts returns the TLS hosts ACME must manage: those it can issue
+// for that no current listed certificate covers.
+func managedHosts(tlsHosts []string, certs *certificateStore, manager *acmeManager) []string {
+	if manager == nil {
+		return nil
+	}
+	var managed []string
+	for _, host := range tlsHosts {
+		if acmeEligible(host) && !covers(certs.current, host) {
+			managed = append(managed, host)
+		}
+	}
+	return managed
 }
 
 // acmeManagerFor reuses the previous manager when its configuration is

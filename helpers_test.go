@@ -104,7 +104,7 @@ func writeCertificate(t *testing.T, notAfter time.Time, names ...string) Certifi
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: names[0]},
 		DNSNames:     names,
-		NotBefore:    notAfter.Add(-48 * time.Hour),
+		NotBefore:    earliest(time.Now().Add(-time.Hour), notAfter.Add(-48*time.Hour)),
 		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},

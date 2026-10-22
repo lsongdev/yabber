@@ -25,12 +25,28 @@ func (f CertificateSourceFunc) Certificates() ([]tls.Certificate, error) { retur
 // certificateTable selects certificates by SNI hostname.
 type certificateTable = hostTable[*tls.Certificate]
 
-// loadCertificates indexes every certificate by its DNS names. When several
-// certificates cover a name, the one that expires last wins, so a renewed
-// certificate can be added before the old one is removed. Expired
-// certificates are logged rather than rejected: one stale certificate must
-// not stop the whole gateway from starting or reloading.
-func loadCertificates(files []Certificate, source CertificateSource, logger *slog.Logger) (*certificateTable, error) {
+// certificateGrace is how long a listed certificate must remain valid to
+// count as covering its names. Within it, ACME takes over a host a day
+// before the listed certificate expires.
+const certificateGrace = 24 * time.Hour
+
+// certificateStore holds the listed certificates, split by validity. Only
+// current certificates cover hosts; stale ones (expired, expiring within
+// certificateGrace, or not yet valid) are served only as a last resort, so
+// one stale file never blocks a reload but never blocks ACME either.
+type certificateStore struct {
+	current *certificateTable
+	stale   *certificateTable
+}
+
+func (s *certificateStore) empty() bool {
+	return s.current.empty() && s.stale.empty()
+}
+
+// loadCertificates reads the listed certificates and those from source. When
+// several certificates cover a name, the one that expires last wins, so a
+// renewed certificate can be added before the old one is removed.
+func loadCertificates(files []Certificate, source CertificateSource, logger *slog.Logger) (*certificateStore, error) {
 	var certificates []tls.Certificate
 	for _, file := range files {
 		if file.Cert == "" || file.Key == "" {
@@ -50,7 +66,7 @@ func loadCertificates(files []Certificate, source CertificateSource, logger *slo
 		certificates = append(certificates, extra...)
 	}
 
-	table := newHostTable[*tls.Certificate]()
+	store := &certificateStore{current: newHostTable[*tls.Certificate](), stale: newHostTable[*tls.Certificate]()}
 	now := time.Now()
 	for i := range certificates {
 		certificate := &certificates[i]
@@ -61,20 +77,22 @@ func loadCertificates(files []Certificate, source CertificateSource, logger *slo
 		if len(leaf.DNSNames) == 0 {
 			return nil, fmt.Errorf("certificate %q has no DNS names", leaf.Subject.CommonName)
 		}
-		if now.After(leaf.NotAfter) || now.Before(leaf.NotBefore) {
-			logger.Warn("certificate is outside its validity period",
+		table := store.current
+		if now.Before(leaf.NotBefore) || now.Add(certificateGrace).After(leaf.NotAfter) {
+			table = store.stale
+			logger.Warn("certificate is expired, expiring or not yet valid; it no longer covers its names",
 				"names", strings.Join(leaf.DNSNames, ","),
 				"not_before", leaf.NotBefore, "not_after", leaf.NotAfter)
 		}
 		for _, name := range leaf.DNSNames {
 			name = normalizeHost(name)
-			if current, ok := table.get(name); ok && !current.Leaf.NotAfter.Before(leaf.NotAfter) {
+			if existing, ok := table.get(name); ok && !existing.Leaf.NotAfter.Before(leaf.NotAfter) {
 				continue
 			}
 			table.set(name, certificate)
 		}
 	}
-	return table, nil
+	return store, nil
 }
 
 func parseLeaf(certificate *tls.Certificate) error {

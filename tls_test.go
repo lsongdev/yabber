@@ -76,7 +76,7 @@ func TestExpiredCertificateWarnsInsteadOfFailing(t *testing.T) {
 	if err := Validate(config, WithLogger(slog.New(slog.NewTextHandler(&logs, nil)))); err != nil {
 		t.Fatalf("expired certificate blocked the configuration: %v", err)
 	}
-	if !strings.Contains(logs.String(), "outside its validity period") {
+	if !strings.Contains(logs.String(), "no longer covers its names") {
 		t.Fatalf("logs = %q", logs.String())
 	}
 }

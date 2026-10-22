@@ -54,7 +54,14 @@ With `tls.acme`, every host served over TLS that no listed certificate covers
 gets its own certificate through ACME HTTP-01. Yabber listens on `:80` and
 `:443`, registers an account (agreeing to the CA's terms), answers challenges
 ahead of the HTTP-to-HTTPS redirect, and renews each certificate two thirds
-into its lifetime. Failed attempts back off from 5 minutes to 12 hours.
+into its lifetime. Failed attempts back off from 5 minutes to 12 hours; a
+reload (SIGHUP or `Apply`) retries failing hosts after at most a minute, so
+fixing DNS and reloading takes effect at once.
+
+`/metrics` exports `yabber_certificate_expiry_timestamp_seconds` for every
+certificate (0 while a managed one is pending) and
+`yabber_certificate_acme_error` for managed names. Alert on
+`yabber_certificate_expiry_timestamp_seconds - time() < 14 * 86400`.
 
 | Field | Meaning |
 | --- | --- |
@@ -111,8 +118,12 @@ listener unless it lists `listeners: [...]`.
 never reference certificates. A site served on a TLS listener must be covered
 by a certificate or by ACME, which is checked when the configuration loads. When several
 certificates cover a name, the one that expires last wins, so a renewed
-certificate can simply be added. Expired certificates are logged, not
-rejected, so one stale certificate never blocks a reload. HTTP/2 is
+certificate can simply be added. Listed certificates are re-read every hour,
+so renewals written to disk (by certbot, for example) are picked up without a
+reload. A listed certificate that is expired, not yet valid, or within a day
+of expiry no longer covers its names: with `tls.acme` they move to ACME, and
+otherwise it is still served with a warning, so one stale file never blocks a
+reload. HTTP/2 is
 negotiated automatically. A site that is also served over TLS redirects
 plain HTTP to HTTPS unless it sets `allow_http: true`.
 

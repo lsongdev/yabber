@@ -31,13 +31,37 @@ type Server struct {
 	running  map[string]*runningListener
 	started  bool
 	draining sync.WaitGroup // replaced listeners finishing in-flight requests
-	issuer   *acmeIssuer    // the ACME loop, while started
+
+	// Background work while started: the ACME loop of the active manager,
+	// and the periodic re-read of listed certificates.
+	issuer    *task
+	issuerOf  *acmeManager
+	refresher *task
 }
 
-type acmeIssuer struct {
-	manager *acmeManager
-	cancel  context.CancelFunc
-	done    chan struct{}
+// certificateRefreshInterval is how often listed certificates are re-read,
+// picking up renewals on disk and handing expiring names to ACME.
+const certificateRefreshInterval = time.Hour
+
+// task is a goroutine that runs until stopped.
+type task struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+func startTask(run func(context.Context)) *task {
+	ctx, cancel := context.WithCancel(context.Background())
+	t := &task{cancel: cancel, done: make(chan struct{})}
+	go func() {
+		defer close(t.done)
+		run(ctx)
+	}()
+	return t
+}
+
+func (t *task) stop() {
+	t.cancel()
+	<-t.done
 }
 
 type runningListener struct {
@@ -125,7 +149,7 @@ func New(config Config, options ...Option) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.commitLocked(nil, compiled)
+	s.commitLocked(nil, compiled, true)
 	return s, nil
 }
 
@@ -181,7 +205,7 @@ func (s *Server) applyLocked(config Config) error {
 		return err
 	}
 	if !s.started {
-		s.commitLocked(previous, next)
+		s.commitLocked(previous, next, true)
 		return nil
 	}
 
@@ -212,7 +236,7 @@ func (s *Server) applyLocked(config Config) error {
 		started[name] = running
 	}
 
-	s.commitLocked(previous, next)
+	s.commitLocked(previous, next, true)
 	for _, name := range stale {
 		s.drain(s.running[name], next.server)
 		delete(s.running, name)
@@ -223,10 +247,11 @@ func (s *Server) applyLocked(config Config) error {
 	return nil
 }
 
-// commitLocked makes next the active snapshot.
-func (s *Server) commitLocked(previous, next *snapshot) {
+// commitLocked makes next the active snapshot. reload marks a configuration
+// change, which lets ACME retry failing hosts soon.
+func (s *Server) commitLocked(previous, next *snapshot, reload bool) {
 	if next.acme != nil {
-		next.acme.setHosts(next.managedHosts)
+		next.acme.setHosts(next.managedHosts, reload)
 	}
 	s.current.Store(next)
 	s.syncIssuerLocked()
@@ -242,22 +267,51 @@ func (s *Server) syncIssuerLocked() {
 	if s.started {
 		want = s.current.Load().acme
 	}
-	if s.issuer != nil && s.issuer.manager == want {
+	if s.issuerOf == want {
 		return
 	}
 	if s.issuer != nil {
-		s.issuer.cancel()
-		<-s.issuer.done
-		s.issuer = nil
+		s.issuer.stop()
+		s.issuer, s.issuerOf = nil, nil
 	}
 	if want != nil {
-		ctx, cancel := context.WithCancel(context.Background())
-		issuer := &acmeIssuer{manager: want, cancel: cancel, done: make(chan struct{})}
-		go func() {
-			defer close(issuer.done)
-			want.run(ctx)
-		}()
-		s.issuer = issuer
+		s.issuer, s.issuerOf = startTask(want.run), want
+	}
+}
+
+// refreshCertificatesLocked re-reads listed certificates and reassigns ACME
+// hosts, keeping the rest of the active snapshot.
+func (s *Server) refreshCertificatesLocked() error {
+	current := s.current.Load()
+	certs, err := loadCertificates(current.config.TLS.Certificates, s.opts.certificates, s.opts.logger)
+	if err != nil {
+		return err
+	}
+	next := *current
+	next.certs = certs
+	next.managedHosts = managedHosts(current.tlsHosts, certs, current.acme)
+	s.commitLocked(nil, &next, false)
+	return nil
+}
+
+func (s *Server) refreshCertificates(ctx context.Context) {
+	ticker := time.NewTicker(certificateRefreshInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		s.mu.Lock()
+		var err error
+		if ctx.Err() == nil {
+			err = s.refreshCertificatesLocked()
+		}
+		s.mu.Unlock()
+		if err != nil {
+			s.opts.logger.Error("refreshing certificates failed; keeping the loaded ones", "error", err)
+		}
 	}
 }
 
@@ -303,6 +357,7 @@ func (s *Server) Start() error {
 	s.running = running
 	s.started = true
 	s.syncIssuerLocked()
+	s.refresher = startTask(s.refreshCertificates)
 	return nil
 }
 
@@ -314,7 +369,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	running := s.running
 	s.running, s.started = nil, false
 	s.syncIssuerLocked()
+	refresher := s.refresher
+	s.refresher = nil
 	s.mu.Unlock()
+	// The refresher takes s.mu, so it is stopped without holding it.
+	if refresher != nil {
+		refresher.stop()
+	}
 
 	var (
 		wg   sync.WaitGroup
@@ -408,9 +469,12 @@ func (s *Server) Healthy() bool {
 	return true
 }
 
-// Metrics returns request metrics accumulated since New.
+// Metrics returns request metrics accumulated since New, and the current
+// certificates.
 func (s *Server) Metrics() MetricsSnapshot {
-	return s.metrics.snapshot()
+	snapshot := s.metrics.snapshot()
+	snapshot.Certificates = s.Certificates()
+	return snapshot
 }
 
 func (s *Server) listen(name string, spec listenerSpec) (*runningListener, error) {
@@ -466,17 +530,21 @@ func (s *Server) drain(running *runningListener, config ServerConfig) {
 	})
 }
 
-// certificate selects a listed certificate by SNI, then an ACME one.
+// certificate selects by SNI: a current listed certificate, then an ACME
+// one, then a stale listed one.
 func (s *Server) certificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 	snap := s.current.Load()
 	host := requestHost(hello.ServerName)
-	if certificate, ok := snap.certs.match(host); ok {
+	if certificate, ok := snap.certs.current.match(host); ok {
 		return certificate, nil
 	}
 	if snap.acme != nil {
 		if certificate, ok := snap.acme.certificate(host); ok {
 			return certificate, nil
 		}
+	}
+	if certificate, ok := snap.certs.stale.match(host); ok {
+		return certificate, nil
 	}
 	return nil, fmt.Errorf("no certificate for %q", hello.ServerName)
 }

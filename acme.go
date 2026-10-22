@@ -33,6 +33,10 @@ const (
 	acmeCheckInterval    = 12 * time.Hour
 	acmeMinRetry         = 5 * time.Minute
 	acmeMaxRetry         = 12 * time.Hour
+	// acmeReloadRetry is the shortest wait after a failure when a reload asks
+	// for an early retry, keeping well under Let's Encrypt's limit of five
+	// failed validations per hostname per hour.
+	acmeReloadRetry = time.Minute
 )
 
 // HTTP01Store answers ACME HTTP-01 challenges for an ACME client running
@@ -107,9 +111,10 @@ type acmeManager struct {
 }
 
 type acmeFailure struct {
-	err     error
-	count   int
-	retryAt time.Time
+	err      error
+	count    int
+	failedAt time.Time
+	retryAt  time.Time
 }
 
 func newACMEManager(config ACMEConfig, logger *slog.Logger) (*acmeManager, error) {
@@ -157,10 +162,18 @@ func newACMEManager(config ACMEConfig, logger *slog.Logger) (*acmeManager, error
 }
 
 // setHosts replaces the managed hostnames, loading stored certificates for
-// new ones, and wakes the issuing loop.
-func (m *acmeManager) setHosts(hosts []string) {
+// new ones, and wakes the issuing loop. A reload resets backoff, since the
+// configuration or DNS may have been fixed, but never retries a host sooner
+// than acmeReloadRetry after its last failure.
+func (m *acmeManager) setHosts(hosts []string, reload bool) {
 	m.mu.Lock()
 	m.hosts = hosts
+	if reload {
+		for _, failure := range m.failures {
+			failure.count = 0
+			failure.retryAt = earliest(failure.retryAt, failure.failedAt.Add(acmeReloadRetry))
+		}
+	}
 	for _, host := range hosts {
 		if m.certs[host] != nil {
 			continue
@@ -233,39 +246,53 @@ func (m *acmeManager) maintain(ctx context.Context) time.Time {
 			next = earliest(next, renewAt(certificate.Leaf))
 			continue
 		}
-		m.mu.RLock()
-		failure := m.failures[host]
-		m.mu.RUnlock()
-		if failure != nil && now.Before(failure.retryAt) {
-			next = earliest(next, failure.retryAt)
+		if retryAt := m.retryAt(host); now.Before(retryAt) {
+			next = earliest(next, retryAt)
 			continue
 		}
 
 		certificate, err := m.obtain(ctx, host)
+		if err != nil {
+			if ctx.Err() != nil {
+				break
+			}
+			retryAt := m.recordFailure(host, err)
+			next = earliest(next, retryAt)
+			m.logger.Warn("ACME certificate request failed", "host", host, "error", err, "retry_at", retryAt)
+			continue
+		}
 		m.mu.Lock()
-		if err != nil {
-			if failure == nil {
-				failure = &acmeFailure{}
-			}
-			failure.err, failure.count = err, failure.count+1
-			failure.retryAt = time.Now().Add(min(acmeMinRetry<<min(failure.count-1, 10), acmeMaxRetry))
-			m.failures[host] = failure
-			next = earliest(next, failure.retryAt)
-		} else {
-			m.certs[host] = certificate
-			delete(m.failures, host)
-			next = earliest(next, renewAt(certificate.Leaf))
-		}
+		m.certs[host] = certificate
+		delete(m.failures, host)
 		m.mu.Unlock()
-		if err != nil {
-			if ctx.Err() == nil {
-				m.logger.Warn("ACME certificate request failed", "host", host, "error", err, "retry_at", failure.retryAt)
-			}
-		} else {
-			m.logger.Info("ACME certificate obtained", "host", host, "not_after", certificate.Leaf.NotAfter)
-		}
+		next = earliest(next, renewAt(certificate.Leaf))
+		m.logger.Info("ACME certificate obtained", "host", host, "not_after", certificate.Leaf.NotAfter)
 	}
 	return next
+}
+
+func (m *acmeManager) retryAt(host string) time.Time {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if failure := m.failures[host]; failure != nil {
+		return failure.retryAt
+	}
+	return time.Time{}
+}
+
+// recordFailure notes a failed attempt and returns when to retry: 5 minutes
+// after the first failure, doubling up to 12 hours.
+func (m *acmeManager) recordFailure(host string, err error) time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	failure := m.failures[host]
+	if failure == nil {
+		failure = &acmeFailure{}
+		m.failures[host] = failure
+	}
+	failure.err, failure.count, failure.failedAt = err, failure.count+1, time.Now()
+	failure.retryAt = failure.failedAt.Add(min(acmeMinRetry<<min(failure.count-1, 10), acmeMaxRetry))
+	return failure.retryAt
 }
 
 // renewAt is two thirds into a certificate's lifetime: 30 days before expiry
@@ -481,10 +508,12 @@ func (m *acmeManager) statuses() []CertificateStatus {
 	return statuses
 }
 
-func staticCertificateStatuses(table *certificateTable) []CertificateStatus {
+func staticCertificateStatuses(store *certificateStore) []CertificateStatus {
 	seen := make(map[*tls.Certificate]bool)
 	var statuses []CertificateStatus
-	for _, certificates := range []map[string]*tls.Certificate{table.exact, table.wildcard} {
+	for _, certificates := range []map[string]*tls.Certificate{
+		store.current.exact, store.current.wildcard, store.stale.exact, store.stale.wildcard,
+	} {
 		for _, certificate := range certificates {
 			if !seen[certificate] {
 				seen[certificate] = true

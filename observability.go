@@ -75,10 +75,12 @@ type RouteMetrics struct {
 	StatusClasses [6]uint64 `json:"status_classes"`
 }
 
-// MetricsSnapshot is a point-in-time copy of request metrics.
+// MetricsSnapshot is a point-in-time copy of request metrics and certificate
+// state.
 type MetricsSnapshot struct {
-	ActiveRequests int64          `json:"active_requests"`
-	Routes         []RouteMetrics `json:"routes"`
+	ActiveRequests int64               `json:"active_requests"`
+	Routes         []RouteMetrics      `json:"routes"`
+	Certificates   []CertificateStatus `json:"certificates,omitempty"`
 }
 
 // Total sums the per-route metrics.
@@ -174,12 +176,37 @@ func (s MetricsSnapshot) WritePrometheus(w io.Writer) error {
 				metricLabels(route), class, route.StatusClasses[class])
 		}
 	}
+	// Alert on expiry with, for example:
+	//   yabber_certificate_expiry_timestamp_seconds - time() < 14 * 86400
+	// A managed certificate not yet issued reports 0.
+	fmt.Fprintf(b, "# TYPE yabber_certificate_expiry_timestamp_seconds gauge\n")
+	for _, certificate := range s.Certificates {
+		expiry := int64(0)
+		if !certificate.NotAfter.IsZero() {
+			expiry = certificate.NotAfter.Unix()
+		}
+		fmt.Fprintf(b, "yabber_certificate_expiry_timestamp_seconds{%s} %d\n", certificateLabels(certificate), expiry)
+	}
+	fmt.Fprintf(b, "# TYPE yabber_certificate_acme_error gauge\n")
+	for _, certificate := range s.Certificates {
+		if certificate.Managed {
+			failing := 0
+			if certificate.Error != "" {
+				failing = 1
+			}
+			fmt.Fprintf(b, "yabber_certificate_acme_error{%s} %d\n", certificateLabels(certificate), failing)
+		}
+	}
 	return b.Flush()
 }
 
 func metricLabels(route RouteMetrics) string {
 	return fmt.Sprintf(`listener="%s",site="%s",route="%s"`,
 		metricLabel(route.Listener), metricLabel(route.Site), metricLabel(route.Route))
+}
+
+func certificateLabels(certificate CertificateStatus) string {
+	return fmt.Sprintf(`names="%s",managed="%t"`, metricLabel(strings.Join(certificate.Names, ",")), certificate.Managed)
 }
 
 var metricLabelEscaper = strings.NewReplacer(`\`, `\\`, "\n", `\n`, `"`, `\"`)
