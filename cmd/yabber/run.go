@@ -13,6 +13,7 @@ import (
 
 	"github.com/lsongdev/yabber"
 	"github.com/lsongdev/yabber/api"
+	"github.com/lsongdev/yabber/web"
 )
 
 func runCommand(args []string) error {
@@ -74,8 +75,13 @@ func runCommand(args []string) error {
 			return err
 		}
 		apply = management.Apply
-		logger.Info("management API enabled", "address", *admin, "token_file", p.tokenFile())
-		adminServer = &http.Server{Addr: *admin, Handler: management, ReadHeaderTimeout: 10 * time.Second}
+		logger.Info("management panel and API enabled", "address", *admin, "token_file", p.tokenFile())
+		mux := http.NewServeMux()
+		mux.Handle("/", web.Handler())
+		mux.Handle("/api/", management)
+		mux.Handle("GET /healthz", management)
+		mux.Handle("GET /metrics", management)
+		adminServer = &http.Server{Addr: *admin, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				logger.Error("admin server stopped", "error", err)

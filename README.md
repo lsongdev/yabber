@@ -293,10 +293,25 @@ Options extend the gateway without growing the configuration schema:
   compiled when the configuration loads, so syntax errors fail validation,
   and a script stops when its request is cancelled or times out.
 
+## Management panel
+
+`yabber run -admin 127.0.0.1:9180` also serves a web panel at
+`http://127.0.0.1:9180/`: an overview of health, listeners and traffic,
+site editing (a form for single-handler sites, JSON for everything else),
+certificates with their expiry and ACME errors, recent events, and the whole
+configuration. Sign in with the token from `DIR/admin.token`. To reach a
+server's panel from your machine, tunnel it: `ssh -L 9180:127.0.0.1:9180 host`.
+
+The panel ([`web/`](web/)) is plain ES modules on Preact and htm with no
+build step. The two libraries are vendored unmodified by
+[`web/vendor.sh`](web/vendor.sh), which checks the npm registry's integrity
+hashes, and loaded through an import map that the server allows by its hash
+in a strict Content-Security-Policy. Everything is embedded in the binary.
+
 ## Management API
 
-`yabber run -admin 127.0.0.1:9180` serves a JSON API for dashboards and
-automation (package [`api`](api/api.go)). Requests need the token that is
+The panel uses a JSON API for dashboards and automation (package
+[`api`](api/api.go)). Requests need the token that is
 generated into `DIR/admin.token` on first start:
 
 ```sh
@@ -338,4 +353,5 @@ other systems is a separate layer on top of the public API:
 - `api` is the management API over `Config`, `Update`, `Status`,
   `Certificates`, `Events` and `Metrics`; `cmd/yabber` serves it with
   `-admin` and saves changes to the configuration file.
-- A web dashboard (`web/`) will sit on top of `api`.
+- `web` is the panel, static files over `api`, served by `cmd/yabber`
+  next to it.
