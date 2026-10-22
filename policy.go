@@ -1,11 +1,14 @@
 package yabber
 
 import (
+	"container/list"
+	"context"
 	"errors"
 	"fmt"
 	"math"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,12 +22,15 @@ const (
 )
 
 type compiledPolicy struct {
-	middleware Middleware
 	definition Policy
+	middleware []Middleware
 }
 
-func compilePolicies(input []Policy, previous map[string]compiledPolicy) (map[string]compiledPolicy, error) {
-	result := make(map[string]compiledPolicy, len(input))
+// compilePolicies builds every policy. A policy whose definition is unchanged
+// from prev is reused, so its rate-limit buckets and concurrency slots
+// survive Apply.
+func compilePolicies(input []Policy, prev map[string]*compiledPolicy) (map[string]*compiledPolicy, error) {
+	result := make(map[string]*compiledPolicy, len(input))
 	for _, policy := range input {
 		if policy.Name == "" {
 			return nil, errors.New("policy name is required")
@@ -32,225 +38,234 @@ func compilePolicies(input []Policy, previous map[string]compiledPolicy) (map[st
 		if _, exists := result[policy.Name]; exists {
 			return nil, fmt.Errorf("duplicate policy name %q", policy.Name)
 		}
-		if existing, ok := previous[policy.Name]; ok && reflect.DeepEqual(existing.definition, policy) {
+		if existing, ok := prev[policy.Name]; ok && reflect.DeepEqual(existing.definition, policy) {
 			result[policy.Name] = existing
 			continue
 		}
-
-		var middleware []Middleware
-		if policy.Request != nil {
-			items, err := requestMiddleware(policy.Name, *policy.Request)
-			if err != nil {
-				return nil, err
-			}
-			middleware = append(middleware, items...)
+		compiled, err := compilePolicy(policy)
+		if err != nil {
+			return nil, fmt.Errorf("policy %q: %w", policy.Name, err)
 		}
-		if policy.RateLimit != nil {
-			item, err := newRateLimitMiddleware(policy.Name, *policy.RateLimit)
-			if err != nil {
-				return nil, err
-			}
-			middleware = append(middleware, item)
-		}
-		if policy.Concurrency != nil {
-			item, err := newConcurrencyMiddleware(policy.Name, *policy.Concurrency)
-			if err != nil {
-				return nil, err
-			}
-			middleware = append(middleware, item)
-		}
-		if len(middleware) == 0 {
-			return nil, fmt.Errorf("policy %q has no behavior", policy.Name)
-		}
-		policyName := policy.Name
-		policyMiddleware := append([]Middleware(nil), middleware...)
-		result[policy.Name] = compiledPolicy{
-			middleware: func(next http.Handler) http.Handler {
-				wrapped := chain(next, policyMiddleware...)
-				return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					state := requestStateFromContext(r.Context())
-					if state != nil {
-						if _, exists := state.Applied[policyName]; exists {
-							next.ServeHTTP(w, r)
-							return
-						}
-						state.Applied[policyName] = struct{}{}
-					}
-					wrapped.ServeHTTP(w, r)
-				})
-			},
-			definition: policy,
-		}
+		result[policy.Name] = compiled
 	}
 	return result, nil
 }
 
-func applyPolicies(
-	handler http.Handler,
-	names []string,
-	policies map[string]compiledPolicy,
-	scope string,
-) (http.Handler, error) {
+func compilePolicy(policy Policy) (*compiledPolicy, error) {
+	compiled := &compiledPolicy{definition: policy}
+	if config := policy.Request; config != nil {
+		if config.MaxBodyBytes < 0 || config.Timeout < 0 {
+			return nil, errors.New("request limits cannot be negative")
+		}
+		if config.MaxBodyBytes == 0 && config.Timeout == 0 {
+			return nil, errors.New("request policy sets no limit")
+		}
+		if config.Timeout > 0 {
+			compiled.middleware = append(compiled.middleware, timeoutMiddleware(time.Duration(config.Timeout)))
+		}
+		if config.MaxBodyBytes > 0 {
+			compiled.middleware = append(compiled.middleware, bodyLimitMiddleware(policy.Name, config.MaxBodyBytes))
+		}
+	}
+	if config := policy.RateLimit; config != nil {
+		limiter, err := newRateLimiter(policy.Name, *config)
+		if err != nil {
+			return nil, err
+		}
+		compiled.middleware = append(compiled.middleware, limiter.middleware)
+	}
+	if config := policy.Concurrency; config != nil {
+		if config.Max <= 0 {
+			return nil, errors.New("concurrency max must be positive")
+		}
+		compiled.middleware = append(compiled.middleware, concurrencyMiddleware(policy.Name, config.Max))
+	}
+	if len(compiled.middleware) == 0 {
+		return nil, errors.New("policy has no limits")
+	}
+	return compiled, nil
+}
+
+// wrap applies the policy to next unless an outer scope already applied it
+// to this request.
+func (p *compiledPolicy) wrap(next http.Handler) http.Handler {
+	wrapped := Chain(next, p.middleware...)
+	name := p.definition.Name
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if state := requestStateFrom(r.Context()); state != nil {
+			if !state.markApplied(name) {
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
+		wrapped.ServeHTTP(w, r)
+	})
+}
+
+func applyPolicies(handler http.Handler, names []string, policies map[string]*compiledPolicy) (http.Handler, error) {
 	for i := len(names) - 1; i >= 0; i-- {
 		policy, ok := policies[names[i]]
 		if !ok {
-			return nil, fmt.Errorf("%s references unknown policy %q", scope, names[i])
+			return nil, fmt.Errorf("unknown policy %q", names[i])
 		}
-		handler = policy.middleware(handler)
+		handler = policy.wrap(handler)
 	}
 	return handler, nil
 }
 
-func requestMiddleware(name string, config RequestPolicy) ([]Middleware, error) {
-	if config.MaxBodyBytes < 0 {
-		return nil, fmt.Errorf("policy %q has negative max_body_bytes", name)
-	}
-	if config.Timeout < 0 {
-		return nil, fmt.Errorf("policy %q has negative timeout", name)
-	}
-	var result []Middleware
-	if config.Timeout > 0 {
-		result = append(result, func(next http.Handler) http.Handler {
-			return http.TimeoutHandler(next, config.Timeout, "gateway timeout\n")
+// timeoutMiddleware bounds a request through its context. Unlike
+// http.TimeoutHandler it does not buffer the response, so streaming,
+// WebSockets and large downloads pass through untouched.
+func timeoutMiddleware(timeout time.Duration) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx, cancel := context.WithTimeout(r.Context(), timeout)
+			defer cancel()
+			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	}
-	if config.MaxBodyBytes > 0 {
-		result = append(result, func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.ContentLength > config.MaxBodyBytes {
-					reject(w, r, name+":body", http.StatusRequestEntityTooLarge, "request body too large")
-					return
-				}
-				r.Body = http.MaxBytesReader(w, r.Body, config.MaxBodyBytes)
+}
+
+func bodyLimitMiddleware(policy string, limit int64) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.ContentLength > limit {
+				reject(w, r, policy+":body", http.StatusRequestEntityTooLarge, "request body too large")
+				return
+			}
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func concurrencyMiddleware(policy string, limit int) Middleware {
+	slots := make(chan struct{}, limit)
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			select {
+			case slots <- struct{}{}:
+				defer func() { <-slots }()
 				next.ServeHTTP(w, r)
-			})
+			default:
+				w.Header().Set("Retry-After", "1")
+				reject(w, r, policy+":concurrency", http.StatusServiceUnavailable, "too many concurrent requests")
+			}
 		})
 	}
-	if len(result) == 0 {
-		return nil, fmt.Errorf("policy %q request policy has no limit", name)
-	}
-	return result, nil
 }
 
-type rateLimitEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
+// rateLimiter is a token bucket per client, or one shared bucket. Clients
+// are kept in LRU order so that idle entries expire in O(1) and a full table
+// evicts the least recently seen client instead of rejecting new ones.
+type rateLimiter struct {
+	name       string
+	limit      rate.Limit
+	burst      int
+	retryAfter string
+	global     *rate.Limiter
 
-type rateLimitMiddleware struct {
-	name        string
-	limit       rate.Limit
-	burst       int
-	key         string
 	maxKeys     int
 	idleTimeout time.Duration
-	retryAfter  int
 	mu          sync.Mutex
-	entries     map[string]*rateLimitEntry
-	requests    uint64
+	clients     map[string]*list.Element
+	recent      *list.List // of *rateClient, most recent first
 }
 
-func newRateLimitMiddleware(name string, config RateLimitPolicy) (Middleware, error) {
-	if config.RequestsPerSecond <= 0 {
-		return nil, fmt.Errorf("policy %q rate limit must be positive", name)
-	}
-	if config.Burst <= 0 {
-		return nil, fmt.Errorf("policy %q rate limit burst must be positive", name)
-	}
-	key := strings.ToLower(strings.TrimSpace(config.Key))
-	if key == "" {
-		key = "client_ip"
-	}
-	if key != "client_ip" && key != "global" {
-		return nil, fmt.Errorf("policy %q has unsupported rate limit key %q", name, config.Key)
-	}
-	maxKeys := config.MaxKeys
-	if maxKeys == 0 {
-		maxKeys = defaultRateLimitMaxKeys
-	}
-	if maxKeys < 0 {
-		return nil, fmt.Errorf("policy %q rate limit max_keys must be positive", name)
-	}
-	idleTimeout := config.IdleTimeout
-	if idleTimeout == 0 {
-		idleTimeout = defaultRateLimitIdleTimeout
-	}
-	if idleTimeout < 0 {
-		return nil, fmt.Errorf("policy %q rate limit idle_timeout must be positive", name)
-	}
-	limiter := &rateLimitMiddleware{
-		name: name, limit: rate.Limit(config.RequestsPerSecond),
-		burst: config.Burst, key: key, maxKeys: maxKeys,
-		idleTimeout: idleTimeout,
-		retryAfter:  max(1, int(math.Ceil(1/config.RequestsPerSecond))),
-		entries:     make(map[string]*rateLimitEntry),
-	}
-	return limiter.wrap, nil
+type rateClient struct {
+	key     string
+	limiter *rate.Limiter
+	seen    time.Time
 }
 
-func (m *rateLimitMiddleware) wrap(next http.Handler) http.Handler {
+func newRateLimiter(name string, config RateLimitPolicy) (*rateLimiter, error) {
+	if config.RequestsPerSecond <= 0 || config.Burst <= 0 {
+		return nil, errors.New("rate limit requests_per_second and burst must be positive")
+	}
+	if config.MaxKeys < 0 || config.IdleTimeout < 0 {
+		return nil, errors.New("rate limit max_keys and idle_timeout cannot be negative")
+	}
+	limiter := &rateLimiter{
+		name:        name,
+		limit:       rate.Limit(config.RequestsPerSecond),
+		burst:       config.Burst,
+		retryAfter:  strconv.Itoa(max(1, int(math.Ceil(1/config.RequestsPerSecond)))),
+		maxKeys:     config.MaxKeys,
+		idleTimeout: durationOr(config.IdleTimeout, defaultRateLimitIdleTimeout),
+	}
+	if limiter.maxKeys == 0 {
+		limiter.maxKeys = defaultRateLimitMaxKeys
+	}
+	switch strings.ToLower(strings.TrimSpace(config.Key)) {
+	case "", "client_ip":
+		limiter.clients = make(map[string]*list.Element)
+		limiter.recent = list.New()
+	case "global":
+		limiter.global = rate.NewLimiter(limiter.limit, limiter.burst)
+	default:
+		return nil, fmt.Errorf("unsupported rate limit key %q", config.Key)
+	}
+	return limiter, nil
+}
+
+func (l *rateLimiter) middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		key := "global"
-		if m.key == "client_ip" {
-			key = ClientIP(r)
-			if key == "" {
-				key = "unknown"
-			}
-		}
-		if !m.allow(key, time.Now()) {
-			w.Header().Set("Retry-After", fmt.Sprintf("%d", m.retryAfter))
-			reject(w, r, m.name+":rate", http.StatusTooManyRequests, "rate limit exceeded")
+		if !l.allow(r, time.Now()) {
+			w.Header().Set("Retry-After", l.retryAfter)
+			reject(w, r, l.name+":rate", http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
-func (m *rateLimitMiddleware) allow(key string, now time.Time) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.requests++
-	if m.requests%256 == 0 {
-		m.cleanup(now)
+func (l *rateLimiter) allow(r *http.Request, now time.Time) bool {
+	if l.global != nil {
+		return l.global.AllowN(now, 1)
 	}
-	entry := m.entries[key]
-	if entry == nil {
-		if len(m.entries) >= m.maxKeys {
-			m.cleanup(now)
-			if len(m.entries) >= m.maxKeys {
-				return false
-			}
+	key := rateLimitKey(r)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for oldest := l.recent.Back(); oldest != nil; oldest = l.recent.Back() {
+		client := oldest.Value.(*rateClient)
+		if now.Sub(client.seen) < l.idleTimeout {
+			break
 		}
-		entry = &rateLimitEntry{limiter: rate.NewLimiter(m.limit, m.burst)}
-		m.entries[key] = entry
+		l.remove(oldest)
 	}
-	entry.lastSeen = now
-	return entry.limiter.AllowN(now, 1)
+	var client *rateClient
+	if element, ok := l.clients[key]; ok {
+		client = element.Value.(*rateClient)
+		l.recent.MoveToFront(element)
+	} else {
+		if l.recent.Len() >= l.maxKeys {
+			l.remove(l.recent.Back())
+		}
+		client = &rateClient{key: key, limiter: rate.NewLimiter(l.limit, l.burst)}
+		l.clients[key] = l.recent.PushFront(client)
+	}
+	client.seen = now
+	return client.limiter.AllowN(now, 1)
 }
 
-func (m *rateLimitMiddleware) cleanup(now time.Time) {
-	for key, entry := range m.entries {
-		if now.Sub(entry.lastSeen) > m.idleTimeout {
-			delete(m.entries, key)
-		}
-	}
+func (l *rateLimiter) remove(element *list.Element) {
+	l.recent.Remove(element)
+	delete(l.clients, element.Value.(*rateClient).key)
 }
 
-func newConcurrencyMiddleware(name string, config ConcurrencyPolicy) (Middleware, error) {
-	if config.Max <= 0 {
-		return nil, fmt.Errorf("policy %q concurrency max must be positive", name)
+// rateLimitKey groups IPv6 clients by /64, the smallest block a single
+// subscriber is usually assigned, so one client cannot rotate addresses to
+// escape the limit.
+func rateLimitKey(r *http.Request) string {
+	state := requestStateFrom(r.Context())
+	if state == nil || !state.clientIP.IsValid() {
+		return "unknown"
 	}
-	semaphore := make(chan struct{}, config.Max)
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			select {
-			case semaphore <- struct{}{}:
-				defer func() { <-semaphore }()
-				next.ServeHTTP(w, r)
-			default:
-				w.Header().Set("Retry-After", "1")
-				reject(w, r, name+":concurrency", http.StatusServiceUnavailable, "concurrency limit exceeded")
-			}
-		})
-	}, nil
+	address := state.clientIP
+	if address.Is6() {
+		prefix, _ := address.Prefix(64)
+		return prefix.String()
+	}
+	return address.String()
 }

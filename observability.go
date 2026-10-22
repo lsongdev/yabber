@@ -2,30 +2,31 @@ package yabber
 
 import (
 	"bufio"
+	"cmp"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// RequestRecord is emitted after a request completes.
+// RequestRecord describes a completed request.
 type RequestRecord struct {
 	Time       time.Time     `json:"time"`
-	Duration   time.Duration `json:"duration"`
+	Duration   time.Duration `json:"duration_ns"`
 	RequestID  string        `json:"request_id"`
 	Listener   string        `json:"listener"`
-	Host       string        `json:"host,omitempty"`
+	Site       string        `json:"site,omitempty"`
 	Route      string        `json:"route,omitempty"`
-	ClientIP   string        `json:"client_ip"`
+	ClientIP   string        `json:"client_ip,omitempty"`
 	Method     string        `json:"method"`
+	Host       string        `json:"host"`
 	Path       string        `json:"path"`
 	Status     int           `json:"status"`
 	Bytes      int64         `json:"bytes"`
@@ -33,7 +34,8 @@ type RequestRecord struct {
 	Panicked   bool          `json:"panicked,omitempty"`
 }
 
-// Observer receives completed request records.
+// Observer receives a record for every completed request. It runs on the
+// request goroutine and should return quickly.
 type Observer interface {
 	ObserveRequest(RequestRecord)
 }
@@ -59,161 +61,132 @@ func (l *AccessLog) ObserveRequest(record RequestRecord) {
 	_ = l.encoder.Encode(record)
 }
 
-// RouteMetrics is an aggregate for one listener/host/route tuple.
+// RouteMetrics aggregates requests for one listener, site and route.
 type RouteMetrics struct {
-	Listener      string
-	Host          string
-	Route         string
-	Requests      uint64
-	Errors        uint64
-	Rejected      uint64
-	ResponseBytes uint64
-	TotalDuration time.Duration
-	StatusClasses [6]uint64
+	Listener      string        `json:"listener"`
+	Site          string        `json:"site"`
+	Route         string        `json:"route"`
+	Requests      uint64        `json:"requests"`
+	Errors        uint64        `json:"errors"`
+	Rejected      uint64        `json:"rejected"`
+	ResponseBytes uint64        `json:"response_bytes"`
+	TotalDuration time.Duration `json:"total_duration_ns"`
+	// StatusClasses counts responses by status class; index 2 is 2xx.
+	StatusClasses [6]uint64 `json:"status_classes"`
 }
 
-// MetricsSnapshot is a point-in-time copy of server request metrics.
+// MetricsSnapshot is a point-in-time copy of request metrics.
 type MetricsSnapshot struct {
-	ActiveRequests uint64
-	Requests       uint64
-	Errors         uint64
-	Rejected       uint64
-	ResponseBytes  uint64
-	TotalDuration  time.Duration
-	StatusClasses  [6]uint64
-	Routes         []RouteMetrics
+	ActiveRequests int64          `json:"active_requests"`
+	Routes         []RouteMetrics `json:"routes"`
+}
+
+// Total sums the per-route metrics.
+func (s MetricsSnapshot) Total() RouteMetrics {
+	var total RouteMetrics
+	for _, route := range s.Routes {
+		total.Requests += route.Requests
+		total.Errors += route.Errors
+		total.Rejected += route.Rejected
+		total.ResponseBytes += route.ResponseBytes
+		total.TotalDuration += route.TotalDuration
+		for i := range total.StatusClasses {
+			total.StatusClasses[i] += route.StatusClasses[i]
+		}
+	}
+	return total
 }
 
 type metricKey struct {
-	listener string
-	host     string
-	route    string
+	listener, site, route string
 }
 
-type Metrics struct {
-	active        atomic.Uint64
-	requests      atomic.Uint64
-	errors        atomic.Uint64
-	rejected      atomic.Uint64
-	responseBytes atomic.Uint64
-	durationNS    atomic.Uint64
-	statusClasses [6]atomic.Uint64
-	mu            sync.Mutex
-	routes        map[metricKey]*RouteMetrics
+type metrics struct {
+	active atomic.Int64
+	mu     sync.Mutex
+	routes map[metricKey]*RouteMetrics
 }
 
-func newMetrics() *Metrics {
-	return &Metrics{routes: make(map[metricKey]*RouteMetrics)}
+func newMetrics() *metrics {
+	return &metrics{routes: make(map[metricKey]*RouteMetrics)}
 }
 
-func (m *Metrics) begin() { m.active.Add(1) }
-func (m *Metrics) end()   { m.active.Add(^uint64(0)) }
-
-func (m *Metrics) ObserveRequest(record RequestRecord) {
-	m.requests.Add(1)
-	m.responseBytes.Add(uint64(max(record.Bytes, 0)))
-	m.durationNS.Add(uint64(max(record.Duration.Nanoseconds(), 0)))
+func (m *metrics) observe(record RequestRecord) {
+	key := metricKey{listener: record.Listener, site: record.Site, route: record.Route}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	route := m.routes[key]
+	if route == nil {
+		route = &RouteMetrics{Listener: key.listener, Site: key.site, Route: key.route}
+		m.routes[key] = route
+	}
+	route.Requests++
+	route.ResponseBytes += uint64(max(record.Bytes, 0))
+	route.TotalDuration += record.Duration
 	if record.Status >= http.StatusInternalServerError || record.Panicked {
-		m.errors.Add(1)
+		route.Errors++
 	}
 	if record.RejectedBy != "" {
-		m.rejected.Add(1)
+		route.Rejected++
 	}
-	statusClass := record.Status / 100
-	if statusClass >= 1 && statusClass <= 5 {
-		m.statusClasses[statusClass].Add(1)
+	if class := record.Status / 100; class >= 1 && class <= 5 {
+		route.StatusClasses[class]++
 	}
+}
 
-	key := metricKey{listener: record.Listener, host: record.Host, route: record.Route}
+func (m *metrics) snapshot() MetricsSnapshot {
 	m.mu.Lock()
-	item := m.routes[key]
-	if item == nil {
-		item = &RouteMetrics{Listener: key.listener, Host: key.host, Route: key.route}
-		m.routes[key] = item
-	}
-	item.Requests++
-	item.ResponseBytes += uint64(max(record.Bytes, 0))
-	item.TotalDuration += record.Duration
-	if record.Status >= http.StatusInternalServerError || record.Panicked {
-		item.Errors++
-	}
-	if record.RejectedBy != "" {
-		item.Rejected++
-	}
-	if statusClass >= 1 && statusClass <= 5 {
-		item.StatusClasses[statusClass]++
+	routes := make([]RouteMetrics, 0, len(m.routes))
+	for _, route := range m.routes {
+		routes = append(routes, *route)
 	}
 	m.mu.Unlock()
-}
-
-func (m *Metrics) Snapshot() MetricsSnapshot {
-	result := MetricsSnapshot{
-		ActiveRequests: m.active.Load(),
-		Requests:       m.requests.Load(),
-		Errors:         m.errors.Load(),
-		Rejected:       m.rejected.Load(),
-		ResponseBytes:  m.responseBytes.Load(),
-		TotalDuration:  time.Duration(m.durationNS.Load()),
-	}
-	for statusClass := 1; statusClass <= 5; statusClass++ {
-		result.StatusClasses[statusClass] = m.statusClasses[statusClass].Load()
-	}
-	m.mu.Lock()
-	result.Routes = make([]RouteMetrics, 0, len(m.routes))
-	for _, item := range m.routes {
-		result.Routes = append(result.Routes, *item)
-	}
-	m.mu.Unlock()
-	sort.Slice(result.Routes, func(i, j int) bool {
-		left, right := result.Routes[i], result.Routes[j]
-		if left.Listener != right.Listener {
-			return left.Listener < right.Listener
-		}
-		if left.Host != right.Host {
-			return left.Host < right.Host
-		}
-		return left.Route < right.Route
+	slices.SortFunc(routes, func(a, b RouteMetrics) int {
+		return cmp.Or(cmp.Compare(a.Listener, b.Listener), cmp.Compare(a.Site, b.Site), cmp.Compare(a.Route, b.Route))
 	})
-	return result
+	return MetricsSnapshot{ActiveRequests: m.active.Load(), Routes: routes}
 }
 
-// MetricsHandler returns a Prometheus-compatible metrics handler. Applications
-// should mount it on a private administration server.
-func (s *Server) MetricsHandler() http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		snapshot := s.Metrics()
-		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-		_, _ = fmt.Fprintf(w, "# TYPE yabber_http_active_requests gauge\nyabber_http_active_requests %d\n", snapshot.ActiveRequests)
-		for _, route := range snapshot.Routes {
-			labels := fmt.Sprintf(
-				`listener="%s",host="%s",route="%s"`,
-				metricLabel(route.Listener), metricLabel(route.Host), metricLabel(route.Route),
-			)
-			_, _ = fmt.Fprintf(w, "yabber_http_requests_total{%s} %d\n", labels, route.Requests)
-			_, _ = fmt.Fprintf(w, "yabber_http_errors_total{%s} %d\n", labels, route.Errors)
-			_, _ = fmt.Fprintf(w, "yabber_http_rejected_total{%s} %d\n", labels, route.Rejected)
-			_, _ = fmt.Fprintf(w, "yabber_http_response_bytes_total{%s} %d\n", labels, route.ResponseBytes)
-			_, _ = fmt.Fprintf(
-				w, "yabber_http_request_duration_seconds_total{%s} %g\n",
-				labels, route.TotalDuration.Seconds(),
-			)
-			for statusClass := 1; statusClass <= 5; statusClass++ {
-				_, _ = fmt.Fprintf(
-					w,
-					"yabber_http_responses_total{%s,status_class=\"%dxx\"} %d\n",
-					labels, statusClass, route.StatusClasses[statusClass],
-				)
-			}
+// WritePrometheus writes the snapshot in the Prometheus text format.
+func (s MetricsSnapshot) WritePrometheus(w io.Writer) error {
+	b := bufio.NewWriter(w)
+	fmt.Fprintf(b, "# TYPE yabber_http_active_requests gauge\nyabber_http_active_requests %d\n", s.ActiveRequests)
+	counters := []struct {
+		name  string
+		value func(RouteMetrics) string
+	}{
+		{"yabber_http_requests_total", func(r RouteMetrics) string { return fmt.Sprint(r.Requests) }},
+		{"yabber_http_errors_total", func(r RouteMetrics) string { return fmt.Sprint(r.Errors) }},
+		{"yabber_http_rejected_total", func(r RouteMetrics) string { return fmt.Sprint(r.Rejected) }},
+		{"yabber_http_response_bytes_total", func(r RouteMetrics) string { return fmt.Sprint(r.ResponseBytes) }},
+		{"yabber_http_request_duration_seconds_total", func(r RouteMetrics) string { return fmt.Sprint(r.TotalDuration.Seconds()) }},
+	}
+	for _, counter := range counters {
+		fmt.Fprintf(b, "# TYPE %s counter\n", counter.name)
+		for _, route := range s.Routes {
+			fmt.Fprintf(b, "%s{%s} %s\n", counter.name, metricLabels(route), counter.value(route))
 		}
-	})
+	}
+	fmt.Fprintf(b, "# TYPE yabber_http_responses_total counter\n")
+	for _, route := range s.Routes {
+		for class := 1; class <= 5; class++ {
+			fmt.Fprintf(b, "yabber_http_responses_total{%s,status_class=\"%dxx\"} %d\n",
+				metricLabels(route), class, route.StatusClasses[class])
+		}
+	}
+	return b.Flush()
 }
 
-func metricLabel(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, "\n", `\n`)
-	return strings.ReplaceAll(value, `"`, `\"`)
+func metricLabels(route RouteMetrics) string {
+	return fmt.Sprintf(`listener="%s",site="%s",route="%s"`,
+		metricLabel(route.Listener), metricLabel(route.Site), metricLabel(route.Route))
 }
 
+var metricLabelEscaper = strings.NewReplacer(`\`, `\\`, "\n", `\n`, `"`, `\"`)
+
+func metricLabel(value string) string { return metricLabelEscaper.Replace(value) }
+
+// responseTracker records the status and size of a response.
 type responseTracker struct {
 	http.ResponseWriter
 	status int
@@ -226,20 +199,29 @@ func (w *responseTracker) WriteHeader(status int) {
 	if w.status != 0 {
 		return
 	}
-	w.status = status
+	// Informational responses such as 103 Early Hints precede the real one.
+	if status >= 200 || status == http.StatusSwitchingProtocols {
+		w.status = status
+	}
 	w.ResponseWriter.WriteHeader(status)
 }
 
 func (w *responseTracker) Write(data []byte) (int, error) {
 	if w.status == 0 {
-		w.WriteHeader(http.StatusOK)
+		w.status = http.StatusOK
 	}
 	n, err := w.ResponseWriter.Write(data)
 	w.bytes += int64(n)
 	return n, err
 }
 
+// Flush and Hijack are implemented directly, not only through Unwrap, for
+// handlers that type-assert http.Flusher or http.Hijacker.
+
 func (w *responseTracker) Flush() {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 
@@ -247,20 +229,25 @@ func (w *responseTracker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return http.NewResponseController(w.ResponseWriter).Hijack()
 }
 
-func (w *responseTracker) Push(target string, options *http.PushOptions) error {
-	if pusher, ok := w.ResponseWriter.(http.Pusher); ok {
-		return pusher.Push(target, options)
+// requestID reuses X-Request-ID from trusted proxies and otherwise generates
+// one, so clients cannot inject arbitrary values into logs.
+func requestID(r *http.Request, trusted bool) string {
+	if trusted {
+		if id := r.Header.Get("X-Request-ID"); validRequestID(id) {
+			return id
+		}
 	}
-	return http.ErrNotSupported
+	return rand.Text()
 }
 
-func requestID(r *http.Request) string {
-	if value := strings.TrimSpace(r.Header.Get("X-Request-ID")); value != "" && len(value) <= 128 {
-		return value
+func validRequestID(id string) bool {
+	if id == "" || len(id) > 128 {
+		return false
 	}
-	var data [16]byte
-	if _, err := rand.Read(data[:]); err == nil {
-		return hex.EncodeToString(data[:])
+	for _, c := range []byte(id) {
+		if c <= ' ' || c > '~' {
+			return false
+		}
 	}
-	return time.Now().UTC().Format("20060102150405.000000000")
+	return true
 }
