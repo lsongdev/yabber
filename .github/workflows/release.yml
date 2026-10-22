@@ -1,0 +1,53 @@
+name: release
+
+# Every push to master publishes binaries as a release tagged with the UTC
+# date (2026.10.22). A later push on the same day replaces that day's
+# release, so there is one release per day. Tags have no "v" prefix on
+# purpose: Go would read v2026.x.y as major version 2026.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test
+
+  release:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: |
+          echo "VERSION=$(date -u +%Y.%m.%d)" >> "$GITHUB_ENV"
+          make -j4 dist VERSION="$(date -u +%Y.%m.%d)"
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete "$VERSION" --cleanup-tag --yes 2>/dev/null || true
+          git push --delete origin "refs/tags/$VERSION" 2>/dev/null || true
+          gh release create "$VERSION" dist/* \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --notes "Built from ${GITHUB_SHA::7}. Verify downloads with SHA256SUMS."

@@ -21,6 +21,9 @@ import (
 	"github.com/lsongdev/yabber"
 )
 
+// version is set at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 // extensions lists optional handlers compiled in with build tags.
 var extensions []yabber.Option
 
@@ -30,7 +33,12 @@ func main() {
 	admin := flag.String("admin", "", "serve /metrics and /healthz on this address, e.g. 127.0.0.1:9180")
 	accessLog := flag.Bool("access-log", false, "write JSON access logs to stdout")
 	debug := flag.Bool("debug", false, "enable debug logging")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println("yabber", version)
+		return
+	}
 
 	level := slog.LevelInfo
 	if *debug {
@@ -68,6 +76,7 @@ func run(configPath string, check bool, adminAddress string, options []yabber.Op
 	if err := server.Start(); err != nil {
 		return err
 	}
+	logger.Info("yabber started", "version", version)
 	for _, listener := range server.Status().Listeners {
 		logger.Info("listening", "listener", listener.Name, "address", listener.Address, "tls", listener.TLS)
 	}

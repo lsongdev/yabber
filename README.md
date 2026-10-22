@@ -12,8 +12,13 @@ program and reconfigured at runtime through its API.
 
 ## Command
 
+Download a binary from the [releases](https://github.com/lsongdev/yabber/releases)
+(one per day, tagged with the date), or build it:
+
 ```sh
 go install github.com/lsongdev/yabber/cmd/yabber@latest
+make build            # dist/yabber for this machine
+make -j dist          # every platform, plus SHA256SUMS
 yabber -config /etc/yabber/yabber.yaml
 ```
 
@@ -24,6 +29,7 @@ yabber -config /etc/yabber/yabber.yaml
 | `-admin 127.0.0.1:9180` | serve `/metrics` (Prometheus) and `/healthz` |
 | `-access-log` | write JSON access logs to stdout |
 | `-debug` | debug logging, including TLS handshake failures |
+| `-version` | print the version and exit |
 
 `SIGHUP` reloads the configuration and certificates without dropping
 connections; an invalid file is logged and the running configuration is kept.
