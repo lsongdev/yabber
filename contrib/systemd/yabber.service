@@ -1,0 +1,34 @@
+[Unit]
+Description=yabber HTTP/HTTPS gateway
+Documentation=https://github.com/lsongdev/yabber
+Wants=network-online.target
+After=network-online.target
+
+# Configuration: /etc/yabber/config.yaml. Data (ACME, pid): /var/lib/yabber.
+# Reload: systemctl reload yabber
+# Upgrade: yabber update && systemctl restart yabber
+
+[Service]
+Type=simple
+User=yabber
+Group=yabber
+StateDirectory=yabber
+StateDirectoryMode=0700
+ExecStartPre=/usr/local/bin/yabber check -d /var/lib/yabber -c /etc/yabber/config.yaml
+ExecStart=/usr/local/bin/yabber run -d /var/lib/yabber -c /etc/yabber/config.yaml -admin 127.0.0.1:9180
+ExecReload=/usr/local/bin/yabber check -d /var/lib/yabber -c /etc/yabber/config.yaml
+ExecReload=/usr/local/bin/yabber reload -d /var/lib/yabber
+Restart=on-failure
+RestartSec=5
+LimitNOFILE=65536
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/yabber
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

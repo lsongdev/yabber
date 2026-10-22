@@ -30,8 +30,13 @@ test:
 	go vet -tags worker ./...
 	go test -race ./...
 
+# Release files: binaries, the installer and service definitions, all
+# covered by SHA256SUMS so install.sh can verify what it fetches.
 dist: $(PLATFORMS)
-	cd $(DIST) && shasum -a 256 yabber_* > SHA256SUMS
+	cp install.sh $(DIST)/install.sh
+	cp contrib/systemd/yabber.service $(DIST)/yabber.service
+	cp contrib/openwrt/yabber.init $(DIST)/yabber.init
+	cd $(DIST) && shasum -a 256 yabber_* yabber.init yabber.service install.sh > SHA256SUMS
 
 # Expanded per recipe from the target name, so parallel builds are safe.
 os      = $(word 1,$(subst /, ,$@))

@@ -10,6 +10,26 @@ where all you need is "this domain goes to that port".
 It is both a command and a Go library: the gateway can be embedded in another
 program and reconfigured at runtime through its API.
 
+## Install
+
+```sh
+curl -fsSL https://github.com/lsongdev/yabber/releases/latest/download/install.sh | sh
+```
+
+The installer picks the build for this machine, verifies it against the
+release's `SHA256SUMS`, and installs a service:
+
+| | Binary | Configuration | Data | Service |
+| --- | --- | --- | --- | --- |
+| OpenWrt | `/usr/bin/yabber` | `/etc/yabber/config.yaml` | `/etc/yabber` | [`/etc/init.d/yabber`](contrib/openwrt/yabber.init), kept across sysupgrade |
+| systemd | `/usr/local/bin/yabber` | `/etc/yabber/config.yaml` | `/var/lib/yabber` | [`yabber.service`](contrib/systemd/yabber.service), user `yabber` |
+
+A first install writes a starter configuration and leaves the service
+stopped; running the installer again upgrades the binary and service files
+and restarts the service without touching the configuration. `-v VERSION`
+installs a specific release, `-n` only the binary. On OpenWrt, move LuCI off
+ports 80 and 443 first (the installer prints how).
+
 ## Command
 
 Download a binary from the [releases](https://github.com/lsongdev/yabber/releases)
