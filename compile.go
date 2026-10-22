@@ -396,7 +396,7 @@ type hostDispatcher struct {
 func (d hostDispatcher) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	site, ok := d.sites.match(requestHost(r.Host))
 	if !ok {
-		http.Error(w, "site not found", http.StatusNotFound)
+		http.NotFound(w, r)
 		return
 	}
 	site.handler.ServeHTTP(w, r)

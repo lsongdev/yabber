@@ -210,7 +210,10 @@ negotiated automatically. A site that is also served over TLS redirects
 plain HTTP to HTTPS unless it sets `allow_http: true`.
 
 **Hosts** are exact names, single-label wildcards (`*.example.com`), or `*`
-for anything else.
+for anything else. Requests for hosts no site serves get a plain 404 over
+HTTP, and over HTTPS the handshake is refused without presenting a
+certificate, so the server never reveals which names it hosts. A `*` site
+replaces that, for example with a redirect to your main site.
 
 **Routes** use `net/http.ServeMux` patterns: `/api/` matches a subtree,
 `/health` matches exactly, `/{$}` matches only the root, and `method: GET`
