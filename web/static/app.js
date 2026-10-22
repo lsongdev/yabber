@@ -81,13 +81,15 @@ function App () {
   if (!signedIn) return html`<${Login} onLogin=${() => setSignedIn(true)} />`
   const current = '#/' + (hash.replace(/^#\/?/, '').split('/')[0] ?? '')
   return html`
-    <header class="topbar">
-      <a class="brand" href="#/">yabber</a>
+    <header class="masthead">
+      <div class="title-row">
+        <a class="brand" href="#/">yabber</a>
+        <button class="link" onClick=${() => token.clear()}>Sign out</button>
+      </div>
       <nav>
         ${NAV.map(([href, label]) => html`
           <a href=${href} class=${current === href ? 'active' : ''}>${label}</a>`)}
       </nav>
-      <button class="link" onClick=${() => token.clear()}>Sign out</button>
     </header>
     <main>${route(hash)}</main>`
 }
