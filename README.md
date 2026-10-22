@@ -22,7 +22,7 @@ release's `SHA256SUMS`, and installs a service:
 | | Binary | Configuration | Data | Service |
 | --- | --- | --- | --- | --- |
 | OpenWrt | `/usr/bin/yabber` | `/etc/yabber/config.yaml` | `/etc/yabber` | [`/etc/init.d/yabber`](contrib/openwrt/yabber.init), kept across sysupgrade |
-| systemd | `/usr/local/bin/yabber` | `/etc/yabber/config.yaml` | `/var/lib/yabber` | [`yabber.service`](contrib/systemd/yabber.service), user `yabber` |
+| systemd | `/usr/local/bin/yabber` | `/var/lib/yabber/config.yaml` | `/var/lib/yabber` | [`yabber.service`](contrib/systemd/yabber.service), user `yabber`, API on `127.0.0.1:9180` |
 
 A first install writes a starter configuration and leaves the service
 stopped; running the installer again upgrades the binary and service files
@@ -58,11 +58,13 @@ yabber version
 
 Without `-d`, the data directory is the configuration file's directory, so
 `yabber -d /etc/yabber` and `yabber -c /etc/yabber/config.yaml` are the same.
-Keep configuration and data together on OpenWrt, where `/var` is RAM; under
-systemd, use `/etc/yabber` for configuration and `/var/lib/yabber` for data.
+Keeping the configuration in the data directory, as the installer does, lets
+the management API save changes; the systemd unit leaves `/etc` read-only to
+the service.
 
-`run` also takes `-admin 127.0.0.1:9180` (serve `/metrics` and `/healthz`),
-`-access-log` (JSON access logs on stdout) and `-debug`.
+`run` also takes `-admin 127.0.0.1:9180` (the [management API](#management-api),
+`/metrics` and `/healthz`), `-access-log` (JSON access logs on stdout) and
+`-debug`.
 
 **One instance per data directory.** `run` holds an exclusive lock on
 `DIR/yabber.pid`, so two instances can never share ACME state; instances with
@@ -291,6 +293,39 @@ Options extend the gateway without growing the configuration schema:
   compiled when the configuration loads, so syntax errors fail validation,
   and a script stops when its request is cancelled or times out.
 
+## Management API
+
+`yabber run -admin 127.0.0.1:9180` serves a JSON API for dashboards and
+automation (package [`api`](api/api.go)). Requests need the token that is
+generated into `DIR/admin.token` on first start:
+
+```sh
+TOKEN=$(cat /var/lib/yabber/admin.token)
+curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9180/api/sites
+curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:9180/api/sites \
+  -d '{"hosts": ["app.example.com"], "proxy": "http://127.0.0.1:3000"}'
+```
+
+| Endpoint | |
+| --- | --- |
+| `GET /api/status` | listeners and health |
+| `GET`, `PUT /api/config` | the whole configuration |
+| `GET`, `POST /api/sites` | list or add sites |
+| `GET`, `PUT`, `DELETE /api/sites/{id}` | one site, by name or first host |
+| `GET /api/certificates` | certificates, expiry, ACME errors |
+| `GET /api/events` | recent events |
+| `GET /api/metrics` | request metrics |
+| `GET /healthz`, `GET /metrics` | health and Prometheus, without a token |
+
+Bodies use the configuration's JSON form, the same fields as YAML. A change
+is validated and applied like a reload: an invalid one returns 422 and
+changes nothing. Responses carry the configuration's `ETag`; sending it back
+as `If-Match` makes a write fail with 412 if someone else changed the
+configuration in between. Applied changes are saved to the configuration
+file (comments are not preserved; the previous file is kept as `.bak`), and
+`SIGHUP` reloads are serialized with API writes. Bind the API to a private
+address: it controls the whole gateway.
+
 ## Layout
 
 The core package only routes and serves. Anything that talks to people or
@@ -300,6 +335,7 @@ other systems is a separate layer on top of the public API:
   `Close`.
 - `workers` is an optional handler registered through `WithHandler`; only
   binaries that import it link the JavaScript engine.
-- A management web API or dashboard belongs in its own package. It would
-  call `Config`, `Update`, `Status` and `Metrics`, and persist configurations
-  as YAML or JSON.
+- `api` is the management API over `Config`, `Update`, `Status`,
+  `Certificates`, `Events` and `Metrics`; `cmd/yabber` serves it with
+  `-admin` and saves changes to the configuration file.
+- A web dashboard (`web/`) will sit on top of `api`.

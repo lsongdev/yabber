@@ -123,6 +123,18 @@ type Site struct {
 	Handler   `yaml:",inline"`
 }
 
+// ID identifies the site in logs, metrics and the management API: its Name,
+// or else its first host. IDs are unique within a configuration.
+func (s Site) ID() string {
+	if s.Name != "" {
+		return s.Name
+	}
+	if len(s.Hosts) > 0 {
+		return normalizeHost(s.Hosts[0])
+	}
+	return ""
+}
+
 // Route matches requests by method and path and sends them to one handler.
 type Route struct {
 	// Name labels logs and metrics. It defaults to "METHOD PATH".

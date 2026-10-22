@@ -7,8 +7,8 @@
 #
 # On OpenWrt it installs /usr/bin/yabber and a procd service with
 # configuration and data in /etc/yabber. On systemd hosts it installs
-# /usr/local/bin/yabber, a yabber user and a unit with configuration in
-# /etc/yabber and data in /var/lib/yabber. Running it again upgrades the
+# /usr/local/bin/yabber, a yabber user and a unit with configuration and
+# data in /var/lib/yabber. Running it again upgrades the
 # binary and service files; an existing configuration is never touched.
 #
 # YABBER_BASE_URL replaces the download location, for a mirror that holds
@@ -123,7 +123,7 @@ if [ -r /etc/openwrt_release ]; then
 elif [ -d /run/systemd/system ] || command -v systemctl >/dev/null 2>&1; then
 	PLATFORM=systemd
 	BIN=/usr/local/bin/yabber
-	CONFIG=/etc/yabber/config.yaml
+	CONFIG=/var/lib/yabber/config.yaml
 else
 	PLATFORM=other
 	BIN=/usr/local/bin/yabber
@@ -180,6 +180,8 @@ systemd)
 		useradd --system --no-create-home --shell /usr/sbin/nologin yabber 2>/dev/null ||
 			adduser --system --no-create-home --group yabber
 	fi
+	chown -R yabber:yabber /var/lib/yabber
+	chmod 700 /var/lib/yabber
 	cp "$TMP/yabber.service" /etc/systemd/system/yabber.service
 	systemctl daemon-reload
 	systemctl enable yabber >/dev/null 2>&1

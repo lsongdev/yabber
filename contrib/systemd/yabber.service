@@ -4,7 +4,9 @@ Documentation=https://github.com/lsongdev/yabber
 Wants=network-online.target
 After=network-online.target
 
-# Configuration: /etc/yabber/config.yaml. Data (ACME, pid): /var/lib/yabber.
+# Configuration (/var/lib/yabber/config.yaml) and data (ACME, pid, API token)
+# share the state directory, so the management API can save changes while
+# /etc stays read-only to the service.
 # Reload: systemctl reload yabber
 # Upgrade: yabber update && systemctl restart yabber
 
@@ -14,9 +16,9 @@ User=yabber
 Group=yabber
 StateDirectory=yabber
 StateDirectoryMode=0700
-ExecStartPre=/usr/local/bin/yabber check -d /var/lib/yabber -c /etc/yabber/config.yaml
-ExecStart=/usr/local/bin/yabber run -d /var/lib/yabber -c /etc/yabber/config.yaml -admin 127.0.0.1:9180
-ExecReload=/usr/local/bin/yabber check -d /var/lib/yabber -c /etc/yabber/config.yaml
+ExecStartPre=/usr/local/bin/yabber check -d /var/lib/yabber
+ExecStart=/usr/local/bin/yabber run -d /var/lib/yabber -admin 127.0.0.1:9180
+ExecReload=/usr/local/bin/yabber check -d /var/lib/yabber
 ExecReload=/usr/local/bin/yabber reload -d /var/lib/yabber
 Restart=on-failure
 RestartSec=5

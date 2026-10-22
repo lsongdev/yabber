@@ -111,9 +111,19 @@ func compile(cfg Config, opts *options, prev *snapshot) (*snapshot, error) {
 	for _, listener := range listeners {
 		tables[listener.Name] = newHostTable[siteEntry]()
 	}
+	siteIDs := make(map[string]bool, len(cfg.Sites))
 	for i, site := range cfg.Sites {
+		id := site.ID()
+		if id != "" && siteIDs[id] {
+			return nil, fmt.Errorf("duplicate site %q; give one of them a distinct name", id)
+		}
+		siteIDs[id] = true
 		if err := c.site(site, listeners, byName, tables); err != nil {
-			return nil, fmt.Errorf("site %q: %w", siteLabel(site, i), err)
+			label := id
+			if label == "" {
+				label = fmt.Sprintf("#%d", i+1)
+			}
+			return nil, fmt.Errorf("site %q: %w", label, err)
 		}
 	}
 	c.snap.tlsHosts = slices.Sorted(maps.Keys(c.tlsHosts))
@@ -206,10 +216,7 @@ func (c *compiler) site(site Site, listeners []Listener, byName map[string]Liste
 			return err
 		}
 	}
-	name := site.Name
-	if name == "" {
-		name = hosts[0]
-	}
+	name := site.ID()
 	if err := c.checkExtensions(site.Extensions); err != nil {
 		return err
 	}
@@ -380,17 +387,6 @@ func (c *compiler) transport(key transportKey) *http.Transport {
 	}
 	c.snap.transports[key] = transport
 	return transport
-}
-
-func siteLabel(site Site, index int) string {
-	switch {
-	case site.Name != "":
-		return site.Name
-	case len(site.Hosts) > 0:
-		return site.Hosts[0]
-	default:
-		return fmt.Sprintf("#%d", index+1)
-	}
 }
 
 type hostDispatcher struct {

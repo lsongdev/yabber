@@ -98,6 +98,10 @@ func (p paths) pidFile() string {
 	return filepath.Join(p.dir, "yabber.pid")
 }
 
+func (p paths) tokenFile() string {
+	return filepath.Join(p.dir, "admin.token")
+}
+
 func checkCommand(args []string) error {
 	flags := flag.NewFlagSet("check", flag.ExitOnError)
 	var p paths
