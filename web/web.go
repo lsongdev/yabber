@@ -1,51 +1,118 @@
-// Package web serves yabber's management panel: static ES modules built on
-// Preact and htm, embedded in the binary, with no build step. The panel
-// talks to the management API (package api) in the same origin, using the
-// token the user enters.
+// Package web provides yabber's management panel as a panel module: the
+// management API (package api) paired with a browser UI of native ES
+// modules (ui/, no build step) described by ui/manifest.json.
+//
+// A Panel satisfies the panel module contract without depending on any
+// panel: Handler serves the API with relative routes and Assets holds the
+// UI. Standalone serves both on their own, as `yabber run -admin` does.
 package web
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
-	"encoding/base64"
+	"encoding/hex"
 	"io/fs"
 	"net/http"
-	"regexp"
+	"path"
+	"strings"
+
+	"github.com/lsongdev/yabber/api"
 )
 
-//go:embed static
-var static embed.FS
+//go:embed ui
+var embedded embed.FS
 
-var importMap = regexp.MustCompile(`(?s)<script type="importmap">(.*?)</script>`)
-
-// contentSecurityPolicy allows only the panel's own files and API calls: no
-// third-party origins, no framing, and no inline script except index.html's
-// import map, which is allowed by its hash so that editing it needs no
-// other change.
-func contentSecurityPolicy(index []byte) string {
-	scripts := "'self'"
-	if match := importMap.FindSubmatch(index); match != nil {
-		sum := sha256.Sum256(match[1])
-		scripts += " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+// UI is the panel's browser assets; manifest.json describes them.
+var UI = func() fs.FS {
+	sub, err := fs.Sub(embedded, "ui")
+	if err != nil {
+		panic(err) // the embed directive guarantees the directory exists
 	}
-	return "default-src 'none'; script-src " + scripts + "; style-src 'self'; img-src 'self' data:; " +
-		"connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+	return sub
+}()
+
+// Panel is the management panel for one API.
+type Panel struct{ management *api.API }
+
+// New returns the panel for a management API. Create the API without a
+// token when a panel shell authenticates requests in front of it.
+func New(management *api.API) *Panel { return &Panel{management: management} }
+
+// Handler serves the management API with relative routes.
+func (p *Panel) Handler() http.Handler { return p.management }
+
+// Assets returns the browser UI; manifest.json is at its root.
+func (p *Panel) Assets() fs.FS { return UI }
+
+// csp only allows the panel's own scripts, styles, images and API calls.
+const csp = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+	"connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+// Standalone serves the panel at / and the API at /api/, authenticated by
+// token: scripts send "Authorization: Bearer <token>", browsers use HTTP
+// basic authentication with the token as the password (any user name).
+func (p *Panel) Standalone(token string) http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", http.StripPrefix("/api", p.Handler()))
+	mux.Handle("/", static(p.Assets()))
+	protected := http.NewCrossOriginProtection().Handler(mux)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !authorized(r, token) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="yabber", charset="UTF-8"`)
+			http.Error(w, "unauthorized: use the token from admin.token", http.StatusUnauthorized)
+			return
+		}
+		protected.ServeHTTP(w, r)
+	})
 }
 
-// Handler serves the panel.
-func Handler() http.Handler {
-	files, _ := fs.Sub(static, "static")
-	index, _ := fs.ReadFile(files, "index.html")
-	policy := contentSecurityPolicy(index)
+func authorized(r *http.Request, token string) bool {
+	if bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+		return subtle.ConstantTimeCompare([]byte(bearer), []byte(token)) == 1
+	}
+	_, password, ok := r.BasicAuth()
+	return ok && subtle.ConstantTimeCompare([]byte(password), []byte(token)) == 1
+}
+
+// static serves an embedded file tree with content-hash ETags, and
+// index.html at "/" with the Content-Security-Policy.
+func static(files fs.FS) http.Handler {
+	etags := map[string]string{}
+	fs.WalkDir(files, ".", func(p string, d fs.DirEntry, err error) error {
+		if err == nil && !d.IsDir() {
+			if data, err := fs.ReadFile(files, p); err == nil {
+				sum := sha256.Sum256(data)
+				etags[p] = `"` + hex.EncodeToString(sum[:8]) + `"`
+			}
+		}
+		return nil
+	})
 	server := http.FileServerFS(files)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		header := w.Header()
-		header.Set("Content-Security-Policy", policy)
-		header.Set("X-Content-Type-Options", "nosniff")
-		header.Set("Referrer-Policy", "no-referrer")
-		// Embedded files carry no modification time; revalidate on each load
-		// so an upgraded binary never serves a stale module.
-		header.Set("Cache-Control", "no-cache")
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		name := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if name == "" {
+			name = "index.html"
+		}
+		etag, ok := etags[name]
+		if !ok {
+			http.NotFound(w, r)
+			return
+		}
+		h := w.Header()
+		h.Set("ETag", etag)
+		h.Set("Cache-Control", "no-cache")
+		h.Set("X-Content-Type-Options", "nosniff")
+		if name == "index.html" {
+			h.Set("Content-Security-Policy", csp)
+			http.ServeFileFS(w, r, files, name)
+			return
+		}
 		server.ServeHTTP(w, r)
 	})
 }

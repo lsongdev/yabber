@@ -1,0 +1,8 @@
+/* yabber module styles; the design system is in style.css. */
+.num { text-align: right; font-variant-numeric: tabular-nums; }
+.host { display: inline-block; margin: 0 6px 2px 0; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); font: 12.5px var(--mono); }
+.attr { font-size: 12.5px; margin-top: 2px; }
+.events { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 6px; }
+.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.segmented .btn { border: 0; border-radius: 0; }
+.segmented .btn.active { background: var(--primary-soft); color: var(--primary); }

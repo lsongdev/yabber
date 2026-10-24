@@ -84,7 +84,7 @@ func (f *fixture) serve(host string) string {
 func TestAuthentication(t *testing.T) {
 	f := newFixture(t)
 	for _, header := range []string{"", "Bearer wrong", "Basic " + token, token} {
-		request := httptest.NewRequest("GET", "/api/config", nil)
+		request := httptest.NewRequest("GET", "/config", nil)
 		if header != "" {
 			request.Header.Set("Authorization", header)
 		}
@@ -95,63 +95,70 @@ func TestAuthentication(t *testing.T) {
 		}
 	}
 	unknown := httptest.NewRecorder()
-	f.api.ServeHTTP(unknown, httptest.NewRequest("GET", "/api/nope", nil))
+	f.api.ServeHTTP(unknown, httptest.NewRequest("GET", "/nope", nil))
 	if unknown.Code != http.StatusUnauthorized {
 		t.Errorf("unknown endpoint without a token: %d", unknown.Code)
 	}
-	f.expect(f.do("GET", "/api/nope", ""), http.StatusNotFound)
+	f.expect(f.do("GET", "/nope", ""), http.StatusNotFound)
 
-	for _, open := range []string{"/healthz", "/metrics"} {
+	for _, open := range []http.Handler{api.Healthz(f.server), api.Prometheus(f.server)} {
 		response := httptest.NewRecorder()
-		f.api.ServeHTTP(response, httptest.NewRequest("GET", open, nil))
+		open.ServeHTTP(response, httptest.NewRequest("GET", "/", nil))
 		if response.Code == http.StatusUnauthorized {
-			t.Errorf("%s requires a token", open)
+			t.Error("open endpoint requires a token")
 		}
 	}
-	if _, err := api.New(f.server, api.Options{}); err == nil {
-		t.Error("New accepted an empty token")
+	// Without a token the caller authenticates, so requests pass through.
+	open, err := api.New(f.server, api.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	open.ServeHTTP(response, httptest.NewRequest("GET", "/status", nil))
+	if response.Code != http.StatusOK {
+		t.Errorf("tokenless API: status %d", response.Code)
 	}
 }
 
 func TestReadEndpoints(t *testing.T) {
 	f := newFixture(t)
-	for _, path := range []string{"/api/status", "/api/config", "/api/sites", "/api/certificates", "/api/events", "/api/metrics"} {
+	for _, path := range []string{"/status", "/config", "/sites", "/certificates", "/events", "/metrics"} {
 		response := f.do("GET", path, "")
 		f.expect(response, http.StatusOK)
 		if !json.Valid(response.Body.Bytes()) || response.Header().Get("Content-Type") != "application/json" {
 			t.Errorf("%s: not JSON: %s", path, response.Body.String())
 		}
 	}
-	if body := f.do("GET", "/api/certificates", "").Body.String(); strings.TrimSpace(body) != "[]" {
+	if body := f.do("GET", "/certificates", "").Body.String(); strings.TrimSpace(body) != "[]" {
 		t.Errorf("empty certificates = %s, want []", body)
 	}
 }
 
 func TestSiteLifecycle(t *testing.T) {
 	f := newFixture(t)
-	f.expect(f.do("POST", "/api/sites", `{"hosts":["b.com"],"respond":"b"}`), http.StatusCreated)
+	f.expect(f.do("POST", "/sites", `{"hosts":["b.com"],"respond":"b"}`), http.StatusCreated)
 	if got := f.serve("b.com"); got != "b" {
 		t.Fatalf("new site serves %q", got)
 	}
-	f.expect(f.do("POST", "/api/sites", `{"hosts":["b.com"],"respond":"again"}`), http.StatusConflict)
+	f.expect(f.do("POST", "/sites", `{"hosts":["b.com"],"respond":"again"}`), http.StatusConflict)
 
-	f.expect(f.do("PUT", "/api/sites/b.com", `{"hosts":["b.com","www.b.com"],"respond":"b2"}`), http.StatusOK)
+	f.expect(f.do("PUT", "/sites/b.com", `{"hosts":["b.com","www.b.com"],"respond":"b2"}`), http.StatusOK)
 	if got := f.serve("www.b.com"); got != "b2" {
 		t.Fatalf("replaced site serves %q", got)
 	}
-	f.expect(f.do("PUT", "/api/sites/b.com", `{"name":"other","hosts":["b.com"],"respond":"x"}`), http.StatusBadRequest)
+	f.expect(f.do("PUT", "/sites/b.com", `{"name":"other","hosts":["b.com"],"respond":"x"}`), http.StatusBadRequest)
 
 	// A body without a name keeps the URL's ID even when its first host changes.
-	f.expect(f.do("PUT", "/api/sites/b.com", `{"hosts":["c.com"],"respond":"c"}`), http.StatusOK)
+	f.expect(f.do("PUT", "/sites/b.com", `{"hosts":["c.com"],"respond":"c"}`), http.StatusOK)
 	var site yabber.Site
-	json.Unmarshal(f.do("GET", "/api/sites/b.com", "").Body.Bytes(), &site)
+	json.Unmarshal(f.do("GET", "/sites/b.com", "").Body.Bytes(), &site)
 	if site.Name != "b.com" || site.Hosts[0] != "c.com" {
 		t.Fatalf("site = %#v", site)
 	}
 
-	f.expect(f.do("DELETE", "/api/sites/b.com", ""), http.StatusNoContent)
-	f.expect(f.do("GET", "/api/sites/b.com", ""), http.StatusNotFound)
-	f.expect(f.do("DELETE", "/api/sites/b.com", ""), http.StatusNotFound)
+	f.expect(f.do("DELETE", "/sites/b.com", ""), http.StatusNoContent)
+	f.expect(f.do("GET", "/sites/b.com", ""), http.StatusNotFound)
+	f.expect(f.do("DELETE", "/sites/b.com", ""), http.StatusNotFound)
 	if got := f.serve("c.com"); got == "c" {
 		t.Fatal("deleted site still serves")
 	}
@@ -176,7 +183,7 @@ func TestInvalidChangesAreRejected(t *testing.T) {
 		{`{"hosts":["b.com"]} {}`, http.StatusBadRequest},
 		{`{}`, http.StatusBadRequest},
 	} {
-		response := f.do("POST", "/api/sites", test.body)
+		response := f.do("POST", "/sites", test.body)
 		if response.Code != test.status {
 			t.Errorf("%s: status = %d, want %d: %s", test.body, response.Code, test.status, response.Body.String())
 		}
@@ -188,7 +195,7 @@ func TestInvalidChangesAreRejected(t *testing.T) {
 
 func TestIfMatchPreventsLostUpdates(t *testing.T) {
 	f := newFixture(t)
-	first := f.do("GET", "/api/config", "")
+	first := f.do("GET", "/config", "")
 	tag := first.Header().Get("ETag")
 	if tag == "" {
 		t.Fatal("no ETag")
@@ -198,7 +205,7 @@ func TestIfMatchPreventsLostUpdates(t *testing.T) {
 
 	config.Sites[0].Respond.Body = "edited"
 	body, _ := json.Marshal(config)
-	updated := f.do("PUT", "/api/config", string(body), "If-Match", tag)
+	updated := f.do("PUT", "/config", string(body), "If-Match", tag)
 	f.expect(updated, http.StatusOK)
 	if updated.Header().Get("ETag") == tag {
 		t.Fatal("ETag did not change")
@@ -207,8 +214,8 @@ func TestIfMatchPreventsLostUpdates(t *testing.T) {
 	// A second client still holding the old ETag must not overwrite it.
 	config.Sites[0].Respond.Body = "stale"
 	body, _ = json.Marshal(config)
-	f.expect(f.do("PUT", "/api/config", string(body), "If-Match", tag), http.StatusPreconditionFailed)
-	f.expect(f.do("DELETE", "/api/sites/a.com", "", "If-Match", tag), http.StatusPreconditionFailed)
+	f.expect(f.do("PUT", "/config", string(body), "If-Match", tag), http.StatusPreconditionFailed)
+	f.expect(f.do("DELETE", "/sites/a.com", "", "If-Match", tag), http.StatusPreconditionFailed)
 	if got := f.serve("a.com"); got != "edited" {
 		t.Fatalf("serves %q", got)
 	}
@@ -217,7 +224,7 @@ func TestIfMatchPreventsLostUpdates(t *testing.T) {
 func TestSaveFailureIsReported(t *testing.T) {
 	f := newFixture(t)
 	f.fail = errors.New("disk full")
-	response := f.do("POST", "/api/sites", `{"hosts":["b.com"],"respond":"b"}`)
+	response := f.do("POST", "/sites", `{"hosts":["b.com"],"respond":"b"}`)
 	f.expect(response, http.StatusInternalServerError)
 	if !strings.Contains(response.Body.String(), "applied, but saving failed: disk full") {
 		t.Fatalf("body = %s", response.Body.String())
@@ -230,7 +237,7 @@ func TestConcurrentChangesAreSerialized(t *testing.T) {
 	for i := range 20 {
 		wg.Go(func() {
 			body := fmt.Sprintf(`{"hosts":["s%d.com"],"respond":"x"}`, i)
-			if response := f.do("POST", "/api/sites", body); response.Code != http.StatusCreated {
+			if response := f.do("POST", "/sites", body); response.Code != http.StatusCreated {
 				t.Errorf("status = %d", response.Code)
 			}
 		})
@@ -257,5 +264,27 @@ func TestApplyIsSerializedWithChanges(t *testing.T) {
 	}
 	if len(f.saved) != 0 {
 		t.Fatal("Apply saved the configuration")
+	}
+}
+
+func TestUpdateSavesThroughTheWriteLock(t *testing.T) {
+	f := newFixture(t)
+	err := f.api.Update(func(c *yabber.Config) error {
+		c.Sites = append(c.Sites, yabber.Site{Hosts: []string{"c.com"}, Handler: yabber.Handler{Respond: &yabber.Respond{Body: "c"}}})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.serve("c.com") != "c" || len(f.saved) != 1 || len(f.saved[0].Sites) != 2 {
+		t.Fatalf("served %q, saved %d configs", f.serve("c.com"), len(f.saved))
+	}
+	// An invalid change is rejected and nothing is saved.
+	err = f.api.Update(func(c *yabber.Config) error {
+		c.Sites = append(c.Sites, yabber.Site{Hosts: []string{"c.com"}, Handler: yabber.Handler{Respond: &yabber.Respond{Body: "dup"}}})
+		return nil
+	})
+	if err == nil || len(f.saved) != 1 {
+		t.Fatalf("duplicate host accepted: %v, saved %d", err, len(f.saved))
 	}
 }

@@ -1,0 +1,16 @@
+{
+  "contract": 1,
+  "id": "yabber",
+  "title": "yabber",
+  "icon": "⇉",
+  "entry": "module.js",
+  "styles": ["style.css", "yabber.css"],
+  "home": "/",
+  "nav": [
+    { "path": "/", "title": "Overview", "icon": "◎" },
+    { "path": "/sites", "title": "Sites", "icon": "⇉" },
+    { "path": "/certificates", "title": "Certificates", "icon": "⚿" },
+    { "path": "/events", "title": "Events", "icon": "≡" },
+    { "path": "/config", "title": "Configuration", "icon": "⚙" }
+  ]
+}

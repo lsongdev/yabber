@@ -3,25 +3,30 @@
 // it reads state with Config, Status, Certificates, Events and Metrics, and
 // changes configuration with Update.
 //
-//	GET    /healthz                   liveness, no authentication
-//	GET    /metrics                   Prometheus text, no authentication
-//	GET    /api/status                listeners and health
-//	GET    /api/config                the configuration (ETag)
-//	PUT    /api/config                replace the configuration (If-Match)
-//	GET    /api/sites                 sites
-//	POST   /api/sites                 add a site
-//	GET    /api/sites/{id}            one site
-//	PUT    /api/sites/{id}            replace a site (If-Match)
-//	DELETE /api/sites/{id}            remove a site (If-Match)
-//	GET    /api/certificates          certificates and ACME state
-//	GET    /api/events                recent events
-//	GET    /api/metrics               request metrics as JSON
+// Routes are relative to wherever the handler is mounted (the yabber command
+// serves it at /api/):
 //
-// Every /api request needs "Authorization: Bearer TOKEN". Writes are checked
-// like any configuration change: an invalid one returns 422 and changes
-// nothing. The configuration's ETag changes with every write; sending it
-// back in If-Match turns a conflicting concurrent edit into 412 instead of a
-// lost update.
+//	GET    /status                listeners and health
+//	GET    /config                the configuration (ETag)
+//	PUT    /config                replace the configuration (If-Match)
+//	GET    /sites                 sites
+//	POST   /sites                 add a site
+//	GET    /sites/{id}            one site
+//	PUT    /sites/{id}            replace a site (If-Match)
+//	DELETE /sites/{id}            remove a site (If-Match)
+//	GET    /certificates          certificates and ACME state
+//	GET    /events                recent events
+//	GET    /metrics               request metrics as JSON
+//
+// With Options.Token set, every request needs "Authorization: Bearer
+// TOKEN"; without it the caller authenticates requests before they reach
+// the handler. Writes are checked like any configuration change: an invalid
+// one returns 422 and changes nothing. The configuration's ETag changes with
+// every write; sending it back in If-Match turns a conflicting concurrent
+// edit into 412 instead of a lost update.
+//
+// Healthz and Prometheus serve liveness and Prometheus metrics, which are
+// meant to be reachable without authentication.
 //
 // Serve the handler on a private address: it can change everything the
 // gateway does.
@@ -47,7 +52,8 @@ const maxBodyBytes = 1 << 20
 
 // Options configures the API.
 type Options struct {
-	// Token authenticates /api requests. It is required.
+	// Token authenticates requests. Leave it empty when the handler is
+	// mounted behind the caller's own authentication.
 	Token string
 	// Save persists a configuration once it has been applied, typically by
 	// writing the configuration file, so that a restart or reload keeps API
@@ -68,24 +74,19 @@ type API struct {
 
 // New returns the API for server.
 func New(server *yabber.Server, opts Options) (*API, error) {
-	if opts.Token == "" {
-		return nil, errors.New("api: a token is required")
-	}
 	a := &API{server: server, opts: opts, mux: http.NewServeMux()}
-	a.mux.HandleFunc("GET /healthz", a.healthz)
-	a.mux.HandleFunc("GET /metrics", a.prometheus)
-	a.handle("GET /api/status", a.status)
-	a.handle("GET /api/config", a.getConfig)
-	a.handle("PUT /api/config", a.putConfig)
-	a.handle("GET /api/sites", a.listSites)
-	a.handle("POST /api/sites", a.createSite)
-	a.handle("GET /api/sites/{id}", a.getSite)
-	a.handle("PUT /api/sites/{id}", a.putSite)
-	a.handle("DELETE /api/sites/{id}", a.deleteSite)
-	a.handle("GET /api/certificates", a.certificates)
-	a.handle("GET /api/events", a.events)
-	a.handle("GET /api/metrics", a.metrics)
-	a.mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+	a.handle("GET /status", a.status)
+	a.handle("GET /config", a.getConfig)
+	a.handle("PUT /config", a.putConfig)
+	a.handle("GET /sites", a.listSites)
+	a.handle("POST /sites", a.createSite)
+	a.handle("GET /sites/{id}", a.getSite)
+	a.handle("PUT /sites/{id}", a.putSite)
+	a.handle("DELETE /sites/{id}", a.deleteSite)
+	a.handle("GET /certificates", a.certificates)
+	a.handle("GET /events", a.events)
+	a.handle("GET /metrics", a.metrics)
+	a.mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if a.authorized(w, r) {
 			writeError(w, http.StatusNotFound, errors.New("no such endpoint"))
 		}
@@ -106,6 +107,21 @@ func (a *API) Apply(config yabber.Config) error {
 	return a.server.Apply(config)
 }
 
+// Update changes the configuration through the API's write lock and saves
+// it like an API write, for other programs that edit the gateway at runtime
+// (for example to publish an app) without racing API clients.
+func (a *API) Update(modify func(*yabber.Config) error) error {
+	a.writes.Lock()
+	defer a.writes.Unlock()
+	if err := a.server.Update(modify); err != nil {
+		return err
+	}
+	if a.opts.Save != nil {
+		return a.opts.Save(a.server.Config())
+	}
+	return nil
+}
+
 // handle registers an authenticated endpoint.
 func (a *API) handle(pattern string, handler http.HandlerFunc) {
 	a.mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +132,9 @@ func (a *API) handle(pattern string, handler http.HandlerFunc) {
 }
 
 func (a *API) authorized(w http.ResponseWriter, r *http.Request) bool {
+	if a.opts.Token == "" {
+		return true
+	}
 	token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if ok && subtle.ConstantTimeCompare([]byte(token), []byte(a.opts.Token)) == 1 {
 		return true
@@ -125,17 +144,23 @@ func (a *API) authorized(w http.ResponseWriter, r *http.Request) bool {
 	return false
 }
 
-func (a *API) healthz(w http.ResponseWriter, _ *http.Request) {
-	if !a.server.Healthy() {
-		http.Error(w, "unhealthy", http.StatusServiceUnavailable)
-		return
-	}
-	fmt.Fprintln(w, "ok")
+// Healthz answers "ok" while server is healthy and 503 otherwise.
+func Healthz(server *yabber.Server) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if !server.Healthy() {
+			http.Error(w, "unhealthy", http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Fprintln(w, "ok")
+	})
 }
 
-func (a *API) prometheus(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
-	_ = a.server.Metrics().WritePrometheus(w)
+// Prometheus serves server's metrics in the Prometheus text format.
+func Prometheus(server *yabber.Server) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		_ = server.Metrics().WritePrometheus(w)
+	})
 }
 
 func (a *API) status(w http.ResponseWriter, _ *http.Request) {

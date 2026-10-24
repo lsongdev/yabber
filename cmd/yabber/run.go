@@ -70,17 +70,16 @@ func runCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		management, err := api.New(server, api.Options{Token: token, Save: saver(p.config)})
+		management, err := api.New(server, api.Options{Save: saver(p.config)})
 		if err != nil {
 			return err
 		}
 		apply = management.Apply
 		logger.Info("management panel and API enabled", "address", *admin, "token_file", p.tokenFile())
 		mux := http.NewServeMux()
-		mux.Handle("/", web.Handler())
-		mux.Handle("/api/", management)
-		mux.Handle("GET /healthz", management)
-		mux.Handle("GET /metrics", management)
+		mux.Handle("GET /healthz", api.Healthz(server))
+		mux.Handle("GET /metrics", api.Prometheus(server))
+		mux.Handle("/", web.New(management).Standalone(token))
 		adminServer = &http.Server{Addr: *admin, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
 		go func() {
 			if err := adminServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {

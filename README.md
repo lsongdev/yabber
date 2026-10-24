@@ -327,14 +327,16 @@ Options extend the gateway without growing the configuration schema:
 `http://127.0.0.1:9180/`: an overview of health, listeners and traffic,
 site editing (a form for single-handler sites, JSON for everything else),
 certificates with their expiry and ACME errors, recent events, and the whole
-configuration. Sign in with the token from `DIR/admin.token`. To reach a
+configuration. Sign in with the token from `DIR/admin.token` as the
+password (any user name). To reach a
 server's panel from your machine, tunnel it: `ssh -L 9180:127.0.0.1:9180 host`.
 
 The panel ([`web/`](web/)) is plain ES modules on Preact and htm with no
-build step. The two libraries are vendored unmodified by
-[`web/vendor.sh`](web/vendor.sh), which checks the npm registry's integrity
-hashes, and loaded through an import map that the server allows by its hash
-in a strict Content-Security-Policy. Everything is embedded in the binary.
+build step, vendored in `web/ui/vendor` and served under a strict
+Content-Security-Policy. Everything is embedded in the binary. The panel
+follows the panel module contract (a `manifest.json` and a
+`mount(el, ctx)` entry point; `web.New(api).Handler()` and `Assets()`), so a
+larger panel can mount it beside other modules.
 
 ## Management API
 
@@ -379,9 +381,11 @@ other systems is a separate layer on top of the public API:
 - `workers` is an optional handler registered through `WithHandler`; only
   binaries that import it link the JavaScript engine.
 - `api` is the management API over `Config`, `Update`, `Status`,
-  `Certificates`, `Events` and `Metrics`; `cmd/yabber` serves it with
-  `-admin` and saves changes to the configuration file.
-- `web` is the panel, static files over `api`, served by `cmd/yabber`
-  next to it.
+  `Certificates`, `Events` and `Metrics`, with relative routes; `cmd/yabber`
+  serves it at `/api/` with `-admin` and saves changes with `Save`. Programs
+  embedding the gateway change it through `API.Update` so their edits are
+  serialized with API writes.
+- `web` is the panel over `api` as a panel module, served by `cmd/yabber`
+  next to it (`Panel.Standalone`).
 - `site` is the standalone project website, deployed to GitHub Pages by
   [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
