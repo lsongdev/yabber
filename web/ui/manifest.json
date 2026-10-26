@@ -4,7 +4,7 @@
   "title": "yabber",
   "icon": "⇉",
   "entry": "module.js",
-  "styles": ["style.css", "yabber.css"],
+  "styles": ["vendor/stylesheets.css", "style.css", "yabber.css"],
   "home": "/",
   "nav": [
     { "path": "/", "title": "Overview", "icon": "◎" },

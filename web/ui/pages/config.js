@@ -39,7 +39,7 @@ export default function Config() {
   }
 
   return html`<${Page} title="Configuration"
-    actions=${html`<button type="button" class="btn" onClick=${() => { setError(null); setNotice(''); reload(); }}>Reload</button>`}>
+    actions=${html`<button type="button" class="button" onClick=${() => { setError(null); setNotice(''); reload(); }}>Reload</button>`}>
     <${ErrorBox} error=${state.error} />
     ${state.loading ? html`<${Loading} />` : html`<form class="form card" onSubmit=${save}>
       <textarea class="input code" rows="28" spellcheck="false" value=${text} onInput=${e => setText(e.target.value)}></textarea>
@@ -50,7 +50,7 @@ export default function Config() {
       <${ErrorBox} error=${error} />
       ${notice ? html`<${Notice} tone="info">${notice}<//>` : null}
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit" disabled=${saving}>${saving ? 'Applying…' : 'Apply'}</button>
+        <button class="button button-primary" type="submit" disabled=${saving}>${saving ? 'Applying…' : 'Apply'}</button>
       </div>
     </form>`}
   <//>`;

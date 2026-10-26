@@ -1,5 +1,5 @@
 import { html } from '../lib/html.js';
-import { Page, Empty, Loading } from '../lib/ui.js';
+import { Page, Empty, Loading, Table } from '../lib/ui.js';
 import { useResource, ErrorBox, Badge, dateTime, daysUntil } from '../yabber.js';
 
 function Expiry({ certificate }) {
@@ -17,7 +17,7 @@ export default function Certificates() {
     <${ErrorBox} error=${state.error} />
     ${state.loading ? html`<${Loading} />` : certificates.length === 0
       ? html`<${Empty}>No certificates. Sites on TLS listeners get them from tls.certificates or tls.acme.<//>`
-      : html`<div class="table-wrap"><table class="table">
+      : html`<${Table}>
         <thead><tr><th>Names</th><th>Source</th><th>Expires</th><th>Status</th></tr></thead>
         <tbody>${certificates.map(certificate => html`<tr key=${certificate.names.join()}>
           <td>${certificate.names.map(name => html`<span class="host">${name}</span>`)}</td>
@@ -27,6 +27,6 @@ export default function Certificates() {
             ? html`<span style="color:var(--danger)">${certificate.error}</span><br/><span class="muted">retry ${dateTime(certificate.retry_at)}</span>`
             : html`<${Badge} tone="good">ok<//>`}</td>
         </tr>`)}</tbody>
-      </table></div>`}
+      <//>`}
   <//>`;
 }

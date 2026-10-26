@@ -1,5 +1,5 @@
 import { html } from '../lib/html.js';
-import { Page, Empty, Loading } from '../lib/ui.js';
+import { Page, Empty, Loading, Table } from '../lib/ui.js';
 import { bytes } from '../lib/format.js';
 import { usePanel } from '../lib/panel.js';
 import { useResource, ErrorBox, Badge, ago, daysUntil } from '../yabber.js';
@@ -30,13 +30,13 @@ export default function Overview() {
         <div class="card stat"><span class="stat-label">Sent</span><span class="stat-value">${bytes(total.bytes)}</span></div>
       </div>
 
-      ${expiring.length > 0 ? html`<div class="section"><div class="notice notice-warn">
+      ${expiring.length > 0 ? html`<div class="section"><div class="alert alert-warning">
         ${expiring.length} certificate${expiring.length > 1 ? 's need' : ' needs'} attention.
         <a href=${href('/certificates')}>Review certificates</a>
       </div></div>` : null}
 
       <div class="section"><h2>Listeners</h2>
-        <div class="table-wrap"><table class="table">
+        <${Table}>
           <thead><tr><th>Name</th><th>Address</th><th>TLS</th><th>State</th></tr></thead>
           <tbody>${(status.data?.listeners ?? []).map(listener => html`<tr key=${listener.name}>
             <td>${listener.name}</td>
@@ -44,12 +44,12 @@ export default function Overview() {
             <td>${listener.tls ? 'yes' : 'no'}</td>
             <td>${listener.running ? html`<${Badge} tone="good">running<//>` : html`<${Badge} tone="bad">${listener.error || 'stopped'}<//>`}</td>
           </tr>`)}</tbody>
-        </table></div>
+        <//>
       </div>
 
       <div class="section"><h2>Traffic</h2>
         ${routes.length === 0 ? html`<${Empty}>No requests yet.<//>` : html`
-          <div class="table-wrap"><table class="table">
+          <${Table}>
             <thead><tr>
               <th>Site</th><th>Route</th><th class="num">Requests</th><th class="num">Errors</th>
               <th class="num">2xx</th><th class="num">4xx</th><th class="num">5xx</th><th class="num">Avg</th>
@@ -64,7 +64,7 @@ export default function Overview() {
               <td class="num">${route.status_classes[5]}</td>
               <td class="num">${route.requests ? (route.total_duration_ns / route.requests / 1e6).toFixed(1) : 0} ms</td>
             </tr>`)}</tbody>
-          </table></div>`}
+          <//>`}
       </div>
 
       <div class="section"><h2>Recent events</h2>

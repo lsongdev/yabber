@@ -77,7 +77,7 @@ export default function SiteEditor({ params: { id } }) {
   }, [id]);
 
   const title = id === undefined ? 'Add site' : `Site ${id}`;
-  const back = html`<a class="btn" href=${href('/sites')}>Back</a>`;
+  const back = html`<a class="button" href=${href('/sites')}>Back</a>`;
   if (!loaded) return html`<${Page} title=${title} actions=${back}>${error ? html`<${ErrorBox} error=${error} />` : html`<${Loading} />`}<//>`;
 
   const set = field => event => {
@@ -130,8 +130,8 @@ export default function SiteEditor({ params: { id } }) {
   const handler = HANDLERS[form.kind];
   return html`<${Page} title=${title} actions=${html`
       <span class="segmented">
-        <button type="button" class=${`btn ${mode === 'form' ? 'active' : ''}`} onClick=${() => switchMode('form')}>Form</button>
-        <button type="button" class=${`btn ${mode === 'json' ? 'active' : ''}`} onClick=${() => switchMode('json')}>JSON</button>
+        <button type="button" class=${`button ${mode === 'form' ? 'active' : ''}`} onClick=${() => switchMode('form')}>Form</button>
+        <button type="button" class=${`button ${mode === 'json' ? 'active' : ''}`} onClick=${() => switchMode('json')}>JSON</button>
       </span>
       ${back}`}>
     <form class="form card" onSubmit=${save}>
@@ -154,7 +154,7 @@ export default function SiteEditor({ params: { id } }) {
             ? html`<textarea class="input" rows="4" value=${form.target} onInput=${set('target')} placeholder=${handler.placeholder}></textarea>`
             : html`<input class="input" value=${form.target} onInput=${set('target')} placeholder=${handler.placeholder} required />`}
         <//>
-        <label class="check">
+        <label class="field-check">
           <input type="checkbox" checked=${form.allowHTTP} onChange=${set('allowHTTP')} />
           Serve plain HTTP instead of redirecting to HTTPS
         </label>` : html`
@@ -163,8 +163,8 @@ export default function SiteEditor({ params: { id } }) {
         <//>`}
       <${ErrorBox} error=${error} />
       <div class="form-actions">
-        <button class="btn btn-primary" type="submit" disabled=${saving}>${saving ? 'Saving…' : 'Save'}</button>
-        <a class="btn" href=${href('/sites')}>Cancel</a>
+        <button class="button button-primary" type="submit" disabled=${saving}>${saving ? 'Saving…' : 'Save'}</button>
+        <a class="button" href=${href('/sites')}>Cancel</a>
       </div>
     </form>
   <//>`;
