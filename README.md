@@ -389,3 +389,22 @@ other systems is a separate layer on top of the public API:
   next to it (`Panel.Standalone`).
 - `site` is the standalone project website, deployed to GitHub Pages by
   [`.github/workflows/pages.yml`](.github/workflows/pages.yml).
+
+### Configuration forms
+
+The panel's site editor supports both shorthand handlers and route lists.
+Routes expose method/path matching, policies and the built-in reverse proxy,
+static file, response and redirect options. The Configuration page provides
+forms for listeners, server limits, TLS/certificate files and reusable policies.
+Site definitions can be edited through the site editor or as part of the full
+configuration in JSON mode.
+
+Form state retains the complete loaded document. Editing a control patches only
+that field; unshown options and extension configurations remain intact. Switching
+between Form and JSON keeps the complete document, and unsupported shapes stay
+in JSON mode without rewriting them. Explicitly removing a route, listener,
+policy or handler removes that selected configuration. Saves retain the API's
+ETag/If-Match protection against concurrent edits.
+
+Run the form preservation regression tests with `make test-ui` (Node.js; no npm
+dependencies). `make test` checks the Go server and embedded panel assets.

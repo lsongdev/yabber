@@ -20,7 +20,7 @@ PLATFORMS := \
 	windows/amd64 \
 	windows/arm64
 
-.PHONY: build test dist clean $(PLATFORMS)
+.PHONY: build test test-ui dist clean $(PLATFORMS)
 
 build:
 	CGO_ENABLED=0 go build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $(DIST)/yabber ./cmd/yabber
@@ -29,6 +29,10 @@ test:
 	go vet ./...
 	go vet -tags worker ./...
 	go test -race ./...
+
+# The form preservation tests use Node's built-in runner; no npm install.
+test-ui:
+	node --test web/test/*.test.mjs
 
 # Release files: binaries, the installer and service definitions, all
 # covered by SHA256SUMS, which is signed when YABBER_SIGNING_KEY holds the

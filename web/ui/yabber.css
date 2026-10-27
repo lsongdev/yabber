@@ -6,3 +6,26 @@
 .segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
 .segmented .button { border: 0; border-radius: 0; }
 .segmented .button.active { background: var(--primary-soft); color: var(--primary); }
+
+/* Configuration editors also live inside the panel's shadow root. */
+.editor-content { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.editor-content > .card { margin: 0; }
+.editor-section, .handler-fields, .editor-details-body, .limit-block { display: grid; gap: 14px; min-width: 0; }
+.editor-section h2, .editor-section h3, .editor-section p { margin: 0; }
+.editor-section h3 { font-size: 14px; font-weight: 600; }
+.editor-section-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.editor-section-header h2 { margin-bottom: 4px; }
+.editor-section-header > .button { flex-shrink: 0; }
+.editor-card { display: grid; gap: 14px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); }
+.editor-card legend { padding: 0 6px; font-weight: 600; font-size: 14px; }
+.editor-row-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
+.editor-details > summary, details.editor-section > summary { cursor: pointer; font-weight: 550; }
+.editor-details-body { padding-top: 14px; }
+.editor-details-body > .button, .limit-block > .button, .handler-fields > .button { justify-self: start; }
+.header-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto; gap: 8px; margin-bottom: 8px; }
+.limit-block { border-top: 1px solid var(--border); padding-top: 16px; }
+@media (max-width: 600px) {
+  .header-row { grid-template-columns: minmax(0, 1fr); }
+  .header-row > .button { justify-self: end; }
+  .editor-card { padding: 12px; }
+}
