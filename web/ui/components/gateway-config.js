@@ -105,7 +105,7 @@ export default function GatewayConfig({ value, onChange }) {
       ${policies.map((policy,index)=>html`<${Policy} key=${index} value=${policy} index=${index} onChange=${next=>onChange(updateItem(value,'policies',index,next))} onRemove=${()=>onChange({...value,policies:policies.filter((_,i)=>i!==index)})} />`)}
       <button class="button" type="button" onClick=${()=>onChange({...value,policies:[...policies,{name:''}]})}>Add policy</button>
     </div></details>
-    <section class="card editor-section"><div class="editor-section-header"><div><h2>Sites</h2><p class="field-hint">${Array.isArray(value.sites) ? value.sites.length : 0} site definitions are preserved. Edit hosts and routes in the site editor.</p></div>
+    <section class="card editor-section"><div class="editor-section-header"><div><h2>Sites</h2><p class="field-hint">${(n => `${n} site definition${n === 1 ? ' is' : 's are'} preserved.`)(Array.isArray(value.sites) ? value.sites.length : 0)} Edit hosts and routes in the site editor.</p></div>
       <a class="button" href=${href('/sites')}>Manage sites</a></div>
       <${ExtraFields} value=${value} known=${['version','server','tls','listeners','policies','sites']} />
     </section>`;
