@@ -87,19 +87,19 @@ export default function SiteEditor({ params: { id } }) {
   }
 
   const title = id === undefined ? 'Add site' : `Site ${id}`;
-  const back = html`<a class="button" href=${href('/sites')}>Back</a>`;
-  if (!loaded || loaded.id !== id) return html`<${Page} title=${title} actions=${back}>${error ? html`<${ErrorBox} error=${error} />` : html`<${Loading} />`}<//>`;
+  const back = { href: href('/sites'), label: 'Sites' };
+  if (!loaded || loaded.id !== id) return html`<${Page} title=${title} back=${back}>${error ? html`<${ErrorBox} error=${error} />` : html`<${Loading} />`}<//>`;
   const routes = draft.routes;
   const move = (index, direction) => {
     const next = [...routes];
     [next[index], next[index + direction]] = [next[index + direction], next[index]];
     setDraft({ ...draft, routes: next });
   };
-  return html`<${Page} title=${title} subtitle="Edit hosts and routing. Additional configuration is preserved when using the form." actions=${html`
+  return html`<${Page} title=${title} subtitle="Edit hosts and routing. Additional configuration is preserved when using the form." back=${back} actions=${html`
     <span class="segmented" aria-label="Editor mode">
       <button type="button" class=${`button ${mode === 'form' ? 'active' : ''}`} aria-pressed=${mode === 'form'} disabled=${saving} onClick=${() => switchMode('form')}>Form</button>
       <button type="button" class=${`button ${mode === 'json' ? 'active' : ''}`} aria-pressed=${mode === 'json'} disabled=${saving} onClick=${() => switchMode('json')}>JSON</button>
-    </span>${back}`}>
+    </span>`}>
     <form class="form site-editor" ref=${formElement} onSubmit=${save}>
       <fieldset class="editor-content" disabled=${saving}>
       ${mode === 'form' ? html`
