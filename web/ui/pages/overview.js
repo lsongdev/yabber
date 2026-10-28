@@ -20,9 +20,12 @@ export default function Overview() {
 
   return html`<${Page} title="Overview">
     <${ErrorBox} error=${status.error} />
+    ${status.data && !status.data.enabled ? html`<div class="alert">The gateway is off: no listener is bound.
+      Turn it on in <a href=${href('/config')}>Configuration</a>.</div>` : null}
     ${status.loading ? html`<${Loading} />` : html`
       <div class="grid">
-        <div class="card stat"><span class="stat-label">Health</span><span>${status.data?.healthy
+        <div class="card stat"><span class="stat-label">Health</span><span>${!status.data?.enabled
+          ? html`<${Badge}>off<//>` : status.data?.healthy
           ? html`<${Badge} tone="good">healthy<//>` : html`<${Badge} tone="bad">unhealthy<//>`}</span></div>
         <div class="card stat"><span class="stat-label">Requests</span><span class="stat-value">${total.requests}</span></div>
         <div class="card stat"><span class="stat-label">Errors</span><span class="stat-value">${total.errors}</span></div>
@@ -42,7 +45,8 @@ export default function Overview() {
             <td>${listener.name}</td>
             <td class="mono">${listener.address}</td>
             <td>${listener.tls ? 'yes' : 'no'}</td>
-            <td>${listener.running ? html`<${Badge} tone="good">running<//>` : html`<${Badge} tone="bad">${listener.error || 'stopped'}<//>`}</td>
+            <td>${listener.running ? html`<${Badge} tone="good">running<//>` : !status.data.enabled ? html`<${Badge}>off<//>`
+              : html`<${Badge} tone="bad">${listener.error || 'stopped'}<//>`}</td>
           </tr>`)}</tbody>
         <//>
       </div>

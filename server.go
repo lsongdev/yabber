@@ -223,7 +223,7 @@ func (s *Server) applyLocked(config Config) error {
 
 	var stale []string
 	for name, running := range s.running {
-		if listener := next.listeners[name]; listener == nil || listener.spec != running.spec {
+		if listener := next.bound()[name]; listener == nil || listener.spec != running.spec {
 			stale = append(stale, name)
 		}
 	}
@@ -233,7 +233,7 @@ func (s *Server) applyLocked(config Config) error {
 		s.running[name].stopAccepting()
 	}
 	started := make(map[string]*runningListener)
-	for name, listener := range next.listeners {
+	for name, listener := range next.bound() {
 		if running := s.running[name]; running != nil && running.spec == listener.spec {
 			continue
 		}
@@ -346,6 +346,15 @@ func (s *Server) rebindLocked(names []string) error {
 	return errors.Join(errs...)
 }
 
+// bound returns the listeners to bind: none while the configuration turns
+// the gateway off.
+func (snap *snapshot) bound() map[string]*listenerRuntime {
+	if snap.config.Disabled {
+		return nil
+	}
+	return snap.listeners
+}
+
 // Start binds every listener. It returns once all sockets are bound, or
 // with an error and nothing bound.
 func (s *Server) Start() error {
@@ -356,7 +365,7 @@ func (s *Server) Start() error {
 	}
 	snap := s.current.Load()
 	running := make(map[string]*runningListener, len(snap.listeners))
-	for name, listener := range snap.listeners {
+	for name, listener := range snap.bound() {
 		listener, err := s.listen(name, listener.spec)
 		if err != nil {
 			for _, listener := range running {
@@ -433,7 +442,10 @@ func (s *Server) Close() error {
 
 // Status describes the server's listeners.
 type Status struct {
-	Running   bool             `json:"running"`
+	Running bool `json:"running"`
+	// Enabled is false while the configuration turns the gateway off; its
+	// listeners are then all stopped.
+	Enabled   bool             `json:"enabled"`
 	Listeners []ListenerStatus `json:"listeners"`
 }
 
@@ -451,7 +463,7 @@ func (s *Server) Status() Status {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snap := s.current.Load()
-	status := Status{Running: s.started}
+	status := Status{Running: s.started, Enabled: !snap.config.Disabled}
 	for name, listener := range snap.listeners {
 		item := ListenerStatus{Name: name, Address: listener.spec.address, TLS: listener.spec.tls}
 		if running := s.running[name]; running != nil {
@@ -468,11 +480,15 @@ func (s *Server) Status() Status {
 	return status
 }
 
-// Healthy reports whether the server is running and every listener serves.
+// Healthy reports whether the server is running and every listener
+// serves. A gateway turned off is healthy: nothing is failing.
 func (s *Server) Healthy() bool {
 	status := s.Status()
 	if !status.Running {
 		return false
+	}
+	if !status.Enabled {
+		return true
 	}
 	for _, listener := range status.Listeners {
 		if !listener.Running {

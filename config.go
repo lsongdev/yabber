@@ -19,7 +19,10 @@ const ConfigVersion = 1
 
 // Config describes a complete gateway.
 type Config struct {
-	Version   int          `yaml:"version,omitempty" json:"version,omitempty"`
+	Version int `yaml:"version,omitempty" json:"version,omitempty"`
+	// Disabled binds no listener: the configuration stays loaded and
+	// editable, but the gateway serves nothing until it is turned on.
+	Disabled  bool         `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	Server    ServerConfig `yaml:"server,omitempty" json:"server,omitempty"`
 	TLS       TLSConfig    `yaml:"tls,omitempty" json:"tls,omitempty"`
 	Listeners []Listener   `yaml:"listeners,omitempty" json:"listeners,omitempty"`

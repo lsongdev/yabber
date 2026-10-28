@@ -251,3 +251,39 @@ func TestEventsKeepRecentInfoAndAbove(t *testing.T) {
 		t.Fatalf("last event = %#v", got[len(got)-1])
 	}
 }
+
+// A configuration that turns the gateway off binds nothing; turning it on
+// and off again binds and closes the listeners.
+func TestDisabledBindsNoListener(t *testing.T) {
+	free, _ := net.Listen("tcp", "127.0.0.1:0")
+	addr := free.Addr().String()
+	free.Close()
+	config := siteConfig(Site{Hosts: []string{"a.com"}, Handler: respond("ok")})
+	config.Listeners[0].Address = addr
+	config.Disabled = true
+	server := startServer(t, config)
+	accepts := func() bool {
+		conn, err := net.DialTimeout("tcp", addr, time.Second)
+		if err == nil {
+			conn.Close()
+		}
+		return err == nil
+	}
+	if status := server.Status(); status.Enabled || status.Listeners[0].Running || accepts() || !server.Healthy() {
+		t.Fatalf("off: status %#v, accepts %v", status, accepts())
+	}
+	config.Disabled = false
+	if err := server.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := httpGet(t, addr, "a.com"); status != 200 || body != "ok" {
+		t.Fatalf("on: %d %q", status, body)
+	}
+	config.Disabled = true
+	if err := server.Apply(config); err != nil {
+		t.Fatal(err)
+	}
+	if accepts() {
+		t.Fatal("still accepting after turning off")
+	}
+}

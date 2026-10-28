@@ -71,6 +71,11 @@ export default function GatewayConfig({ value, onChange }) {
   const setTLS = next => onChange({ ...value, tls: next });
   const certificates = tls.certificates ?? [];
   return html`
+    <section class="card editor-section">
+      <label class="field-check"><input type="checkbox" checked=${!value.disabled}
+        onChange=${e => { const { disabled, ...rest } = value; onChange(e.currentTarget.checked ? rest : { ...rest, disabled: true }); }} />Serve traffic</label>
+      <p class="field-hint">When off, no listener is bound; sites and settings are kept.</p>
+    </section>
     <section class="card editor-section"><div class="editor-section-header"><div><h2>Listeners</h2><p class="field-hint">Addresses where the gateway accepts HTTP and HTTPS traffic.</p></div>
       <button class="button" type="button" onClick=${() => onChange({...value,listeners:[...listeners,{name:'',address:''}]})}>Add listener</button>
     </div>
@@ -107,6 +112,6 @@ export default function GatewayConfig({ value, onChange }) {
     </div></details>
     <section class="card editor-section"><div class="editor-section-header"><div><h2>Sites</h2><p class="field-hint">${(n => `${n} site definition${n === 1 ? ' is' : 's are'} preserved.`)(Array.isArray(value.sites) ? value.sites.length : 0)} Edit hosts and routes in the site editor.</p></div>
       <a class="button" href=${href('/sites')}>Manage sites</a></div>
-      <${ExtraFields} value=${value} known=${['version','server','tls','listeners','policies','sites']} />
+      <${ExtraFields} value=${value} known=${['version','disabled','server','tls','listeners','policies','sites']} />
     </section>`;
 }
