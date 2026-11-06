@@ -1,5 +1,5 @@
-import { html, useEffect, useRef, useState } from '../lib/html.js';
-import { Page, Field, Notice, Loading } from '../lib/ui.js';
+import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
+import { Page, Field, Notice, Loading } from '@lsongdev/panel/ui.js';
 import { useResource, useRequest, ErrorBox } from '../yabber.js';
 import { prepareConfig } from '../config-model.js';
 import GatewayConfig from '../components/gateway-config.js';

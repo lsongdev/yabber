@@ -11,10 +11,12 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
 	"encoding/hex"
 	"io/fs"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/lsongdev/yabber/api"
@@ -45,8 +47,21 @@ func (p *Panel) Handler() http.Handler { return p.management }
 // Assets returns the browser UI; manifest.json is at its root.
 func (p *Panel) Assets() fs.FS { return UI }
 
-// csp only allows the panel's own scripts, styles, images and API calls.
-const csp = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
+// csp allows the panel's own scripts, styles, images and API calls, and the
+// inline import map of index.html by its hash.
+func csp(index []byte) string {
+	scripts := "'self'"
+	for _, m := range importMap.FindAllSubmatch(index, -1) {
+		sum := sha256.Sum256(m[1])
+		scripts += " 'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+	}
+	return "script-src " + scripts + "; " + policy
+}
+
+// importMap finds inline import maps, which a script-src without a hash blocks.
+var importMap = regexp.MustCompile(`(?s)<script type="importmap">(.*?)</script>`)
+
+const policy = "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
 	"connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 // Standalone serves the panel at / and the API at /api/, authenticated by
@@ -88,6 +103,8 @@ func static(files fs.FS) http.Handler {
 		}
 		return nil
 	})
+	index, _ := fs.ReadFile(files, "index.html")
+	security := csp(index)
 	server := http.FileServerFS(files)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -109,7 +126,7 @@ func static(files fs.FS) http.Handler {
 		h.Set("Cache-Control", "no-cache")
 		h.Set("X-Content-Type-Options", "nosniff")
 		if name == "index.html" {
-			h.Set("Content-Security-Policy", csp)
+			h.Set("Content-Security-Policy", security)
 			http.ServeFileFS(w, r, files, name)
 			return
 		}

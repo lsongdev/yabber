@@ -1,6 +1,6 @@
-import { html, useState } from '../lib/html.js';
-import { Page, Empty, Loading, confirmDanger, Table } from '../lib/ui.js';
-import { usePanel } from '../lib/panel.js';
+import { html, useState } from '@lsongdev/panel/html.js';
+import { Page, Empty, Loading, confirmDanger, Table } from '@lsongdev/panel/ui.js';
+import { usePanel } from '@lsongdev/panel/panel.js';
 import { useResource, useRequest, ErrorBox, Badge } from '../yabber.js';
 import { siteID, describe } from './site.js';
 

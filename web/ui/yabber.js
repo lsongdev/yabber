@@ -1,10 +1,10 @@
 // yabber's UI conventions on top of the shared components: the management API
 // returns plain JSON with an ETag, and writes send it back in If-Match so a
 // concurrent edit fails with 412 instead of being lost.
-import { html, useCallback } from './lib/html.js';
-import { useResource as useShellResource } from './lib/hooks.js';
-import { usePanel } from './lib/panel.js';
-import { Badge as ShellBadge, Notice } from './lib/ui.js';
+import { html, useCallback } from '@lsongdev/panel/html.js';
+import { useResource as useShellResource } from '@lsongdev/panel/hooks.js';
+import { usePanel } from '@lsongdev/panel/panel.js';
+import { Badge as ShellBadge, Notice } from '@lsongdev/panel/ui.js';
 
 // useRequest returns request(method, path, { body, etag }) → { data, etag }.
 export function useRequest() {

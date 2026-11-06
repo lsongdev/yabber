@@ -1,6 +1,6 @@
-import { html } from '../lib/html.js';
-import { Notice } from '../lib/ui.js';
-import { usePanel } from '../lib/panel.js';
+import { html } from '@lsongdev/panel/html.js';
+import { Notice } from '@lsongdev/panel/ui.js';
+import { usePanel } from '@lsongdev/panel/panel.js';
 import { setField, updateItem } from '../config-model.js';
 import { TextField, Toggle, StringList, SelectField, Fields, ExtraFields } from './config-fields.js';
 

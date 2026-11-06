@@ -1,5 +1,5 @@
-import { html } from '../lib/html.js';
-import { Page, Empty, Loading, Table } from '../lib/ui.js';
+import { html } from '@lsongdev/panel/html.js';
+import { Page, Empty, Loading, Table } from '@lsongdev/panel/ui.js';
 import { useResource, ErrorBox, Badge, dateTime, daysUntil } from '../yabber.js';
 
 function Expiry({ certificate }) {

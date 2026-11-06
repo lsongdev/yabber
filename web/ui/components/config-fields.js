@@ -1,5 +1,5 @@
-import { html, useEffect, useRef, useState } from '../lib/html.js';
-import { Field, ListInput, Notice } from '../lib/ui.js';
+import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
+import { Field, ListInput, Notice } from '@lsongdev/panel/ui.js';
 import { HANDLERS, isBuiltin, handlerKeys, handlerConfig, setField, changeHandler } from '../config-model.js';
 
 export function TextField({ value, name, label, onChange, type = 'text', hint, placeholder, required = false, min, max, disabled = false }) {

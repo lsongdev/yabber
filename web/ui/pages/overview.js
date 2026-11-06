@@ -1,7 +1,7 @@
-import { html } from '../lib/html.js';
-import { Page, Empty, Loading, Table } from '../lib/ui.js';
-import { bytes } from '../lib/format.js';
-import { usePanel } from '../lib/panel.js';
+import { html } from '@lsongdev/panel/html.js';
+import { Page, Empty, Loading, Table } from '@lsongdev/panel/ui.js';
+import { bytes } from '@lsongdev/panel/format.js';
+import { usePanel } from '@lsongdev/panel/panel.js';
 import { useResource, ErrorBox, Badge, ago, daysUntil } from '../yabber.js';
 
 export default function Overview() {
