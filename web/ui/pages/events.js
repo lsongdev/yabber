@@ -1,4 +1,4 @@
-import { html } from '@lsongdev/panel/html.js';
+import { html } from '../lib/html.js';
 import { PageHeader, Empty, Loading, Table } from '@lsongdev/scripts/react/components/index.js';
 import { useResource, ErrorBox, ago, dateTime } from '../yabber.js';
 import { Badge } from '@lsongdev/scripts/react/components/index.js';

@@ -1,4 +1,4 @@
-import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
+import { html, useEffect, useRef, useState } from '../lib/html.js';
 import { PageHeader, Field, Alert, Loading } from '@lsongdev/scripts/react/components/index.js';
 import { useResource, useRequest, ErrorBox } from '../yabber.js';
 import { prepareConfig } from '../config-model.js';

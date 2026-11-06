@@ -1,1 +1,4 @@
 /dist/
+
+# browser dependencies, installed by make deps
+node_modules/

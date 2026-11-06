@@ -1,4 +1,4 @@
-import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
+import { html, useEffect, useRef, useState } from '../lib/html.js';
 import { Field, ListInput, Alert } from '@lsongdev/scripts/react/components/index.js';
 import { HANDLERS, isBuiltin, handlerKeys, handlerConfig, setField, changeHandler } from '../config-model.js';
 

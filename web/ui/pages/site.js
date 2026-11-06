@@ -1,6 +1,6 @@
-import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
+import { html, useEffect, useRef, useState } from '../lib/html.js';
 import { PageHeader, Field, Alert, Loading } from '@lsongdev/scripts/react/components/index.js';
-import { usePanel } from '@lsongdev/panel/panel.js';
+import { usePanel } from '../lib/panel.js';
 import { useRequest, ErrorBox } from '../yabber.js';
 import { prepareSite, addRoute, updateItem } from '../config-model.js';
 import { HandlerFields, TextField, Toggle, StringList, SelectField } from '../components/config-fields.js';

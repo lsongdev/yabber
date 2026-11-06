@@ -1,7 +1,7 @@
-import { html } from '@lsongdev/panel/html.js';
+import { html } from '../lib/html.js';
 import { PageHeader, Empty, Loading, Table } from '@lsongdev/scripts/react/components/index.js';
-import { bytes } from '@lsongdev/panel/format.js';
-import { usePanel } from '@lsongdev/panel/panel.js';
+import { bytes } from '../lib/format.js';
+import { usePanel } from '../lib/panel.js';
 import { useResource, ErrorBox, ago, daysUntil } from '../yabber.js';
 import { Badge } from '@lsongdev/scripts/react/components/index.js';
 
