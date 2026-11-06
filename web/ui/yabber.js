@@ -4,7 +4,7 @@
 import { html, useCallback } from '@lsongdev/panel/html.js';
 import { useResource as useShellResource } from '@lsongdev/panel/hooks.js';
 import { usePanel } from '@lsongdev/panel/panel.js';
-import { Badge as ShellBadge, Notice } from '@lsongdev/panel/ui.js';
+import { Alert } from '@lsongdev/scripts/react/components/index.js';
 
 // useRequest returns request(method, path, { body, etag }) → { data, etag }.
 export function useRequest() {
@@ -24,14 +24,9 @@ export function useResource(path, interval = 0) {
 export function ErrorBox({ error }) {
   if (!error) return null;
   const hint = error.status === 412 ? ' Reload to see the current version, then make your change again.' : '';
-  return html`<${Notice}>${error.message}${hint}<//>`;
+  return html`<${Alert} variant="danger">${error.message}${hint}<//>`;
 }
 
-const tones = { good: 'green', bad: 'red', warn: 'amber', neutral: 'gray' };
-
-export function Badge({ tone = 'neutral', children }) {
-  return html`<${ShellBadge} tone=${tones[tone] || tone}>${children}<//>`;
-}
 
 const units = [['d', 86400], ['h', 3600], ['m', 60], ['s', 1]];
 

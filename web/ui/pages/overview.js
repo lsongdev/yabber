@@ -1,8 +1,9 @@
 import { html } from '@lsongdev/panel/html.js';
-import { Page, Empty, Loading, Table } from '@lsongdev/panel/ui.js';
+import { PageHeader, Empty, Loading, Table } from '@lsongdev/scripts/react/components/index.js';
 import { bytes } from '@lsongdev/panel/format.js';
 import { usePanel } from '@lsongdev/panel/panel.js';
-import { useResource, ErrorBox, Badge, ago, daysUntil } from '../yabber.js';
+import { useResource, ErrorBox, ago, daysUntil } from '../yabber.js';
+import { Badge } from '@lsongdev/scripts/react/components/index.js';
 
 export default function Overview() {
   const { href } = usePanel();
@@ -18,7 +19,7 @@ export default function Overview() {
   const expiring = (metrics.data?.certificates ?? []).filter(certificate =>
     certificate.error || !certificate.not_after || daysUntil(certificate.not_after) < 14);
 
-  return html`<${Page} title="Overview">
+  return html`<${PageHeader} title="Overview" />
     <${ErrorBox} error=${status.error} />
     ${status.data && !status.data.enabled ? html`<div class="alert">The gateway is off: no listener is bound.
       Turn it on in <a href=${href('/config')}>Configuration</a>.</div>` : null}
@@ -26,7 +27,7 @@ export default function Overview() {
       <div class="grid">
         <div class="card stat"><span class="stat-label">Health</span><span>${!status.data?.enabled
           ? html`<${Badge}>off<//>` : status.data?.healthy
-          ? html`<${Badge} tone="good">healthy<//>` : html`<${Badge} tone="bad">unhealthy<//>`}</span></div>
+          ? html`<${Badge} variant="success">healthy<//>` : html`<${Badge} variant="danger">unhealthy<//>`}</span></div>
         <div class="card stat"><span class="stat-label">Requests</span><span class="stat-value">${total.requests}</span></div>
         <div class="card stat"><span class="stat-label">Errors</span><span class="stat-value">${total.errors}</span></div>
         <div class="card stat"><span class="stat-label">Active</span><span class="stat-value">${metrics.data?.active_requests ?? 0}</span></div>
@@ -45,8 +46,8 @@ export default function Overview() {
             <td>${listener.name}</td>
             <td class="mono">${listener.address}</td>
             <td>${listener.tls ? 'yes' : 'no'}</td>
-            <td>${listener.running ? html`<${Badge} tone="good">running<//>` : !status.data.enabled ? html`<${Badge}>off<//>`
-              : html`<${Badge} tone="bad">${listener.error || 'stopped'}<//>`}</td>
+            <td>${listener.running ? html`<${Badge} variant="success">running<//>` : !status.data.enabled ? html`<${Badge}>off<//>`
+              : html`<${Badge} variant="danger">${listener.error || 'stopped'}<//>`}</td>
           </tr>`)}</tbody>
         <//>
       </div>
@@ -78,6 +79,5 @@ export default function Overview() {
               <li key=${i}><span class="muted">${ago(event.time)}</span> ${event.message}</li>`)}</ul>
             <a href=${href('/events')}>All events</a>
           </div>`}
-      </div>`}
-  <//>`;
+      </div>`}`;
 }

@@ -1,5 +1,5 @@
 import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
-import { Page, Field, Notice, Loading } from '@lsongdev/panel/ui.js';
+import { PageHeader, Field, Alert, Loading } from '@lsongdev/scripts/react/components/index.js';
 import { usePanel } from '@lsongdev/panel/panel.js';
 import { useRequest, ErrorBox } from '../yabber.js';
 import { prepareSite, addRoute, updateItem } from '../config-model.js';
@@ -88,18 +88,18 @@ export default function SiteEditor({ params: { id } }) {
 
   const title = id === undefined ? 'Add site' : `Site ${id}`;
   const back = { href: href('/sites'), label: 'Sites' };
-  if (!loaded || loaded.id !== id) return html`<${Page} title=${title} back=${back}>${error ? html`<${ErrorBox} error=${error} />` : html`<${Loading} />`}<//>`;
+  if (!loaded || loaded.id !== id) return html`<${PageHeader} title=${title} back=${back} />${error ? html`<${ErrorBox} error=${error} />` : html`<${Loading} />`}`;
   const routes = draft.routes;
   const move = (index, direction) => {
     const next = [...routes];
     [next[index], next[index + direction]] = [next[index + direction], next[index]];
     setDraft({ ...draft, routes: next });
   };
-  return html`<${Page} title=${title} subtitle="Edit hosts and routing. Additional configuration is preserved when using the form." back=${back} actions=${html`
+  return html`<${PageHeader} title=${title} subtitle="Edit hosts and routing. Additional configuration is preserved when using the form." back=${back} actions=${html`
     <span class="segmented" aria-label="Editor mode">
       <button type="button" class=${`button ${mode === 'form' ? 'active' : ''}`} aria-pressed=${mode === 'form'} disabled=${saving} onClick=${() => switchMode('form')}>Form</button>
       <button type="button" class=${`button ${mode === 'json' ? 'active' : ''}`} aria-pressed=${mode === 'json'} disabled=${saving} onClick=${() => switchMode('json')}>JSON</button>
-    </span>`}>
+    </span>`} />
     <form class="form site-editor" ref=${formElement} onSubmit=${save}>
       <fieldset class="editor-content" disabled=${saving}>
       ${mode === 'form' ? html`
@@ -118,7 +118,7 @@ export default function SiteEditor({ params: { id } }) {
           ${Array.isArray(routes) ? routes.map((route, index) => html`<${RouteEditor} key=${index} route=${route} index=${index} count=${routes.length}
             onChange=${value => setDraft(updateItem(draft, 'routes', index, value))} onRemove=${() => setDraft({ ...draft, routes: routes.filter((_, i) => i !== index) })} onMove=${direction => move(index, direction)} />`)
             : html`<${HandlerFields} value=${draft} onChange=${setDraft} />`}
-          ${Array.isArray(routes) && !routes.length ? html`<${Notice} tone="info">No routes. Add a route to choose a handler.<//>` : null}
+          ${Array.isArray(routes) && !routes.length ? html`<${Alert} variant="info">No routes. Add a route to choose a handler.<//>` : null}
         </section>` : html`
         <section class="card"><${Field} label="Site configuration (JSON)" hint="Edit the complete configuration, including extension settings.">
           <textarea class="input code" rows="24" spellcheck="false" value=${json} onInput=${e => setJSON(e.currentTarget.value)}></textarea>
@@ -126,6 +126,5 @@ export default function SiteEditor({ params: { id } }) {
       </fieldset>
       <${ErrorBox} error=${error} />
       <div class="button-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving ? 'Saving…' : 'Save'}</button><a class="button" href=${href('/sites')}>Cancel</a></div>
-    </form>
-  <//>`;
+    </form>`;
 }

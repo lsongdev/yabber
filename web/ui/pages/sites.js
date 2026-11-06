@@ -1,7 +1,8 @@
 import { html, useState } from '@lsongdev/panel/html.js';
-import { Page, Empty, Loading, confirmDanger, Table } from '@lsongdev/panel/ui.js';
+import { PageHeader, Empty, Loading, Table } from '@lsongdev/scripts/react/components/index.js';
 import { usePanel } from '@lsongdev/panel/panel.js';
-import { useResource, useRequest, ErrorBox, Badge } from '../yabber.js';
+import { useResource, useRequest, ErrorBox } from '../yabber.js';
+import { Badge } from '@lsongdev/scripts/react/components/index.js';
 import { siteID, describe } from './site.js';
 
 export default function Sites() {
@@ -11,7 +12,7 @@ export default function Sites() {
   const [error, setError] = useState(null);
 
   async function remove(site) {
-    if (!confirmDanger(`Delete site ${siteID(site)}? It stops serving immediately.`)) return;
+    if (!window.confirm(`Delete site ${siteID(site)}? It stops serving immediately.`)) return;
     try {
       await request('DELETE', `/sites/${encodeURIComponent(siteID(site))}`, { etag: state.etag });
       setError(null);
@@ -22,7 +23,7 @@ export default function Sites() {
   }
 
   const sites = state.data ?? [];
-  return html`<${Page} title="Sites" actions=${html`<a class="button button-primary" href=${href('/sites/new')}>Add site</a>`}>
+  return html`<${PageHeader} title="Sites" actions=${html`<a class="button button-primary" href=${href('/sites/new')}>Add site</a>`} />
     <${ErrorBox} error=${state.error || error} />
     ${state.loading ? html`<${Loading} />` : sites.length === 0
       ? html`<${Empty}>No sites yet. Add one to start serving.<//>`
@@ -36,6 +37,5 @@ export default function Sites() {
             ${site.policies?.length > 0 ? html` <${Badge}>${site.policies.join(', ')}<//>` : null}</td>
           <td class="actions"><button class="button button-small button-danger" onClick=${() => remove(site)}>Delete</button></td>
         </tr>`)}</tbody>
-      <//>`}
-  <//>`;
+      <//>`}`;
 }

@@ -1,5 +1,5 @@
 import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
-import { Page, Field, Notice, Loading } from '@lsongdev/panel/ui.js';
+import { PageHeader, Field, Alert, Loading } from '@lsongdev/scripts/react/components/index.js';
 import { useResource, useRequest, ErrorBox } from '../yabber.js';
 import { prepareConfig } from '../config-model.js';
 import GatewayConfig from '../components/gateway-config.js';
@@ -50,11 +50,11 @@ export default function Config() {
     finally { setSaving(false); }
   }
 
-  return html`<${Page} title="Configuration" subtitle="Common settings are editable as a form. Unshown settings are retained in the complete configuration."
+  return html`<${PageHeader} title="Configuration" subtitle="Common settings are editable as a form. Unshown settings are retained in the complete configuration."
     actions=${html`<span class="segmented" aria-label="Editor mode">
       <button type="button" class=${`button ${mode==='form'?'active':''}`} aria-pressed=${mode==='form'} disabled=${saving||!state.data} onClick=${()=>switchMode('form')}>Form</button>
       <button type="button" class=${`button ${mode==='json'?'active':''}`} aria-pressed=${mode==='json'} disabled=${saving||!state.data} onClick=${()=>switchMode('json')}>JSON</button>
-    </span><button type="button" class="button" disabled=${saving} onClick=${()=>{setError(null);setNotice('');reload();}}>Reload</button>`}>
+    </span><button type="button" class="button" disabled=${saving} onClick=${()=>{setError(null);setNotice('');reload();}}>Reload</button>`} />
     <${ErrorBox} error=${state.error} />
     ${state.loading ? html`<${Loading} />` : state.data ? html`<form class="form config-editor" onSubmit=${save}>
       <fieldset class="editor-content" disabled=${saving}>
@@ -64,8 +64,7 @@ export default function Config() {
       </fieldset>
       <p class="field-hint">Changes are validated before they are applied. Form edits preserve settings that are not displayed.</p>
       <${ErrorBox} error=${error} />
-      ${notice ? html`<${Notice} tone="info">${notice}<//>` : null}
+      ${notice ? html`<${Alert} variant="info">${notice}<//>` : null}
       <div class="button-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving?'Applying…':'Apply'}</button></div>
-    </form>` : null}
-  <//>`;
+    </form>` : null}`;
 }

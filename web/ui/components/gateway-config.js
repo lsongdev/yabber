@@ -1,5 +1,5 @@
 import { html } from '@lsongdev/panel/html.js';
-import { Notice } from '@lsongdev/panel/ui.js';
+import { Alert } from '@lsongdev/scripts/react/components/index.js';
 import { usePanel } from '@lsongdev/panel/panel.js';
 import { setField, updateItem } from '../config-model.js';
 import { TextField, Toggle, StringList, SelectField, Fields, ExtraFields } from './config-fields.js';
@@ -79,7 +79,7 @@ export default function GatewayConfig({ value, onChange }) {
     <section class="card editor-section"><div class="editor-section-header"><div><h2>Listeners</h2><p class="field-hint">Addresses where the gateway accepts HTTP and HTTPS traffic.</p></div>
       <button class="button" type="button" onClick=${() => onChange({...value,listeners:[...listeners,{name:'',address:''}]})}>Add listener</button>
     </div>
-      ${!listeners.length ? html`<${Notice} tone="info">No explicit listeners. The gateway uses its default HTTP and HTTPS listeners when available.<//>` : null}
+      ${!listeners.length ? html`<${Alert} variant="info">No explicit listeners. The gateway uses its default HTTP and HTTPS listeners when available.<//>` : null}
       ${listeners.map((listener,index) => html`<${Listener} key=${index} value=${listener} index=${index}
         onChange=${next => onChange(updateItem(value,'listeners',index,next))} onRemove=${() => onChange({...value,listeners:listeners.filter((_,i)=>i!==index)})} />`)}
     </section>

@@ -1,5 +1,5 @@
 import { html, useEffect, useRef, useState } from '@lsongdev/panel/html.js';
-import { Field, ListInput, Notice } from '@lsongdev/panel/ui.js';
+import { Field, ListInput, Alert } from '@lsongdev/scripts/react/components/index.js';
 import { HANDLERS, isBuiltin, handlerKeys, handlerConfig, setField, changeHandler } from '../config-model.js';
 
 export function TextField({ value, name, label, onChange, type = 'text', hint, placeholder, required = false, min, max, disabled = false }) {
@@ -76,8 +76,8 @@ export function HandlerFields({ value, onChange, route = false }) {
       ${Object.entries(HANDLERS).map(([key, item]) => html`<option value=${key}>${item.label}</option>`)}
       ${keys.filter(key => !isBuiltin(key)).map(key => html`<option value=${key}>${key} (extension)</option>`)}
     </select><//>
-    ${keys.length > 1 ? html`<${Notice} tone="warn">Multiple handlers are configured. Their values are preserved; use JSON to resolve this configuration.<//>` : null}
-    ${!isBuiltin(kind) ? html`<${Notice} tone="info">The ${kind} extension is preserved. Its settings can be edited in JSON mode.<//>` : html`
+    ${keys.length > 1 ? html`<${Alert} variant="warning">Multiple handlers are configured. Their values are preserved; use JSON to resolve this configuration.<//>` : null}
+    ${!isBuiltin(kind) ? html`<${Alert} variant="info">The ${kind} extension is preserved. Its settings can be edited in JSON mode.<//>` : html`
       ${kind === 'respond' ? html`
         <${Field} label="Response body"><textarea class="input" rows="4" value=${settings.body ?? ''} onInput=${e => change({ ...settings, body: e.currentTarget.value })} placeholder="ok"></textarea><//>
         <${TextField} value=${settings} name="status" label="Status code" placeholder="200" type="number" min="100" max="599" onChange=${change} />
