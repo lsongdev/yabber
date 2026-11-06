@@ -1,11 +1,11 @@
 /* yabber module styles; the design system is in style.css. */
 .num { text-align: right; font-variant-numeric: tabular-nums; }
-.host { display: inline-block; margin: 0 6px 2px 0; padding: 1px 8px; border-radius: 999px; background: var(--surface-2); font: 12.5px var(--mono); }
+.host { display: inline-block; margin: 0 6px 2px 0; padding: 1px 8px; border-radius: 999px; background: var(--color-surface-subtle); font: 12.5px var(--font-mono); }
 .attr { font-size: 12.5px; margin-top: 2px; }
 .events { list-style: none; padding: 0; margin: 0 0 8px; display: grid; gap: 6px; }
-.segmented { display: inline-flex; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.segmented { display: inline-flex; border: 1px solid var(--color-border); border-radius: 6px; overflow: hidden; }
 .segmented .button { border: 0; border-radius: 0; }
-.segmented .button.active { background: var(--primary-soft); color: var(--primary); }
+.segmented .button.active { background: color-mix(in srgb, var(--color-primary) 12%, var(--color-surface)); color: var(--color-primary); }
 
 /* Configuration editors also live inside the panel's shadow root. */
 .editor-content { display: grid; gap: 16px; min-width: 0; margin: 0; padding: 0; border: 0; }
@@ -16,14 +16,14 @@
 .editor-section-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
 .editor-section-header h2 { margin-bottom: 4px; }
 .editor-section-header > .button { flex-shrink: 0; }
-.editor-card { display: grid; gap: 14px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); }
+.editor-card { display: grid; gap: 14px; min-width: 0; margin: 0; padding: 16px; border: 1px solid var(--color-border); border-radius: var(--radius-md); }
 .editor-card legend { padding: 0 6px; font-weight: 600; font-size: 14px; }
 .editor-row-actions { display: flex; justify-content: flex-end; gap: 6px; flex-wrap: wrap; }
 .editor-details > summary, details.editor-section > summary { cursor: pointer; font-weight: 550; }
 .editor-details-body { padding-top: 14px; }
 .editor-details-body > .button, .limit-block > .button, .handler-fields > .button { justify-self: start; }
 .header-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr) auto; gap: 8px; margin-bottom: 8px; }
-.limit-block { border-top: 1px solid var(--border); padding-top: 16px; }
+.limit-block { border-top: 1px solid var(--color-border); padding-top: 16px; }
 @media (max-width: 600px) {
   .header-row { grid-template-columns: minmax(0, 1fr); }
   .header-row > .button { justify-self: end; }

@@ -24,7 +24,7 @@ export default function Certificates() {
           <td>${certificate.managed ? 'ACME' : 'file'}</td>
           <td><${Expiry} certificate=${certificate} /></td>
           <td>${certificate.error
-            ? html`<span style="color:var(--danger)">${certificate.error}</span><br/><span class="muted">retry ${dateTime(certificate.retry_at)}</span>`
+            ? html`<span style="color:var(--color-danger)">${certificate.error}</span><br/><span class="muted">retry ${dateTime(certificate.retry_at)}</span>`
             : html`<${Badge} tone="good">ok<//>`}</td>
         </tr>`)}</tbody>
       <//>`}
