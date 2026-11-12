@@ -65,6 +65,6 @@ export default function Config() {
       <p class="field-hint">Changes are validated before they are applied. Form edits preserve settings that are not displayed.</p>
       <${ErrorBox} error=${error} />
       ${notice ? html`<${Alert} variant="info">${notice}<//>` : null}
-      <div class="button-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving?'Applying…':'Apply'}</button></div>
+      <div class="form-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving?'Applying…':'Apply'}</button></div>
     </form>` : null}`;
 }

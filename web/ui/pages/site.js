@@ -125,6 +125,6 @@ export default function SiteEditor({ params: { id } }) {
         <//></section>`}
       </fieldset>
       <${ErrorBox} error=${error} />
-      <div class="button-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving ? 'Saving…' : 'Save'}</button><a class="button" href=${href('/sites')}>Cancel</a></div>
+      <div class="form-actions"><button class="button button-primary" type="submit" disabled=${saving}>${saving ? 'Saving…' : 'Save'}</button><a class="button" href=${href('/sites')}>Cancel</a></div>
     </form>`;
 }
